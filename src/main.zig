@@ -11,8 +11,6 @@ const SCALE: comptime_int = 2;
 const WIDTH: comptime_int = 320;
 const HEIGHT: comptime_int = 240;
 
-
-
 pub fn main() !void {
   var cpu = CPU.init();
   var mem: Mem = undefined;
@@ -21,7 +19,7 @@ pub fn main() !void {
 
   std.mem.copyForwards(u8, &mem, text);
 
-  cpu.jmp(.{ .absolute = 0x0400 });
+  cpu.pc = 0x0400;
 
   cpu.run(&mem);
 

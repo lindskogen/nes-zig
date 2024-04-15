@@ -35,10 +35,14 @@ pub const CPU = struct {
     return .{ .p = Flags {}, .a = 0, .x = 0, .y = 0, .sp = 0xff, .pc = 0, .cycles = 0 };
   }
 
-
   pub fn jmp(self: *CPU, dst: AddrMode) void {
     self.pc = switch (dst) {
       .absolute => |v| v,
+      else => unreachable,
+    };
+
+    self.cycles += switch (dst) {
+      .absolute => 3,
       else => unreachable,
     };
   }
@@ -46,6 +50,11 @@ pub const CPU = struct {
   fn set_nz_flags(self: *CPU, v: u8) void {
     self.p.zero = v == 0;
     self.p.negative = is_negative(v);
+  }
+
+  fn set_cnz_flags(self: *CPU, v: u8, carry: bool) void {
+    self.set_nz_flags(v);
+    self.p.carry = carry;
   }
 
   fn ldx(self: *CPU, dst: AddrMode) void {
@@ -76,7 +85,43 @@ pub const CPU = struct {
     self.set_nz_flags(self.y);
   }
 
+  fn adc(self: *CPU, mem: *Mem, dst: AddrMode) void {
+     const m = switch (dst) {
+      .immediate => |v| v,
+      .absolute => |v| mem[v],
+      else => unreachable,
+    };
+
+    self.cycles += switch (dst) {
+      .immediate => 2,
+      .absolute => 4,
+      else => unreachable,
+    };
+
+    const r = @addWithOverflow(self.a, m);
+    self.a = r[0];
+    self.set_cnz_flags(self.a, r[1] == 1);
+  }
+
   fn cmp(self: *CPU, mem: *Mem, dst: AddrMode) void {
+    const m = switch (dst) {
+      .immediate => |v| v,
+      .absolute => |v| mem[v],
+      else => unreachable,
+    };
+
+    // std.debug.print("{b:0>8} {b:0>8}\n", .{self.a, m});
+
+    self.cycles += switch (dst) {
+      .immediate => 2,
+      .absolute => 4,
+      else => unreachable,
+    };
+
+    self.set_cnz_flags(self.a -% m, self.a >= m);
+  }
+
+  fn cpx(self: *CPU, mem: *Mem, dst: AddrMode) void {
     const m = switch (dst) {
       .immediate => |v| v,
       .absolute => |v| mem[v],
@@ -89,9 +134,41 @@ pub const CPU = struct {
       else => unreachable,
     };
 
-    self.p.zero = self.a == m;
-    self.p.carry = self.a >= m;
-    self.p.negative = is_negative(self.a - m);
+    self.set_cnz_flags(self.x -% m, self.x >= m);
+  }
+
+  fn cpy(self: *CPU, mem: *Mem, dst: AddrMode) void {
+    const m = switch (dst) {
+      .immediate => |v| v,
+      .absolute => |v| mem[v],
+      else => unreachable,
+    };
+
+    self.cycles += switch (dst) {
+      .immediate => 2,
+      .absolute => 4,
+      else => unreachable,
+    };
+
+    self.set_cnz_flags(self.y -% m, self.y >= m);
+  }
+
+  fn xor(self: *CPU, mem: *Mem, dst: AddrMode) void {
+    const m = switch (dst) {
+      .immediate => |v| v,
+      .absolute => |v| mem[v],
+      else => unreachable,
+    };
+
+    self.cycles += switch (dst) {
+      .immediate => 2,
+      .absolute => 4,
+      else => unreachable,
+    };
+
+    self.a ^= m;
+
+    self.set_nz_flags(self.a);
   }
 
   fn lda(self: *CPU, mem: *Mem, dst: AddrMode) void {
@@ -126,13 +203,13 @@ pub const CPU = struct {
     // No flags affected
   }
 
-  fn bne(self: *CPU, dst: AddrMode) void {
+  inline fn branch(self: *CPU, dst: anytype, cond: bool) void {
     const addr = switch (dst) {
       .relative => |v| v,
       else => unreachable,
     };
 
-    if (!self.p.zero) {
+    if (cond) {
       if (addr >= 0) {
         self.pc += @abs(addr);
       } else {
@@ -149,27 +226,28 @@ pub const CPU = struct {
     // No flags affected
   }
 
+  fn bne(self: *CPU, dst: AddrMode) void {
+    self.branch(dst, !self.p.zero);
+  }
+
+  fn beq(self: *CPU, dst: AddrMode) void {
+    self.branch(dst, self.p.zero);
+  }
+
   fn bpl(self: *CPU, dst: AddrMode) void {
-    const addr = switch (dst) {
-      .relative => |v| v,
-      else => unreachable,
-    };
+    self.branch(dst, !self.p.negative);
+  }
 
-    if (!self.p.negative) {
-      if (addr >= 0) {
-        self.pc += @abs(addr);
-      } else {
-        self.pc -= @abs(addr);
-      }
-      self.cycles += 1; // TODO: +2 if to a new page
-    }
+  fn bmi(self: *CPU, dst: AddrMode) void {
+    self.branch(dst, self.p.negative);
+  }
 
-    self.cycles += switch (dst) {
-      .relative => 2,
-      else => unreachable,
-    };
+  fn bcc(self: *CPU, dst: AddrMode) void {
+    self.branch(dst, !self.p.carry);
+  }
 
-    // No flags affected
+  fn bcs(self: *CPU, dst: AddrMode) void {
+    self.branch(dst, self.p.carry);
   }
 
   fn txs(self: *CPU) void {
@@ -185,11 +263,57 @@ pub const CPU = struct {
     self.set_nz_flags(self.y);
   }
 
+  fn dex(self: *CPU) void {
+    self.x -%= 1;
+    self.cycles += 2;
+
+    self.set_nz_flags(self.x);
+  }
+
+  inline fn push(self: *CPU, mem: *Mem, v: u8) void {
+    mem[0x0100 | @as(u16, self.sp)] = v;
+    self.sp -= 1;
+  }
+
+  fn pha(self: *CPU, mem: *Mem) void {
+    self.push(mem, self.a);
+    self.cycles += 3;
+  }
+
+  fn php(self: *CPU, mem: *Mem) void {
+    self.push(mem, @bitCast(self.p));
+    self.cycles += 3;
+  }
+
+  inline fn pop(self: *CPU, mem: *Mem) u8 {
+    self.sp += 1;
+    const v = mem[0x0100 | @as(u16, self.sp)];
+    return v;
+  }
+
+  fn pla(self: *CPU, mem: *Mem) void {
+    self.a = self.pop(mem);
+    self.cycles += 4;
+    self.set_nz_flags(self.a);
+  }
+
+  fn plp(self: *CPU, mem: *Mem) void {
+    self.p = @bitCast(self.pop(mem));
+    self.cycles += 4;
+  }
+
   fn tya(self: *CPU) void {
     self.a = self.y;
     self.cycles += 2;
 
     self.set_nz_flags(self.a);
+  }
+
+  fn tay(self: *CPU) void {
+    self.y = self.a;
+    self.cycles += 2;
+
+    self.set_nz_flags(self.y);
   }
 
   fn tax(self: *CPU) void {
@@ -204,18 +328,17 @@ pub const CPU = struct {
     while (self.pc != pc) {
       pc = self.pc;
       self.step(mem);
-      std.debug.print("loop {x}\n", .{ pc });
     }
   }
 
-  inline fn operand(self: *CPU, mem: *Mem, comptime addrType: anytype) AddrMode {
+  pub inline fn operand(self: *CPU, mem: *Mem, comptime addrType: anytype) AddrMode {
     switch (addrType) {
       .absolute => {
         const lsb: u16 = mem[self.pc];
         const msb: u16 = mem[self.pc + 1];
         self.pc += 2;
 
-        return .{ .absolute = (msb << 8) & lsb };
+        return .{ .absolute = (msb << 8) | lsb };
       },
       .immediate => {
         const b: u8 = mem[self.pc];
@@ -235,9 +358,21 @@ pub const CPU = struct {
   }
 
   fn step(self: *CPU, mem: *Mem) void {
-    const instr = mem[self.pc];
+    const instr_pos = self.pc;
+    const instr = mem[instr_pos];
     self.pc += 1;
+
     switch (instr) {
+      0x4c => self.jmp(self.operand(mem, .absolute)),
+      // 0x6c => self.jmp(self.operand(mem, .indirect)),
+      // EOR - Exclusive OR
+      0x49 => self.xor(mem, self.operand(mem, .immediate)),
+      0x4d => self.xor(mem, self.operand(mem, .absolute)),
+      // ADC - Add with Carry
+      0x69 => self.adc(mem, self.operand(mem, .immediate)),
+      0x6d => self.adc(mem, self.operand(mem, .absolute)),
+      // TAY - Transfer Accumulator to Y
+      0xa8 => self.tay(),
       // TYA - Transfer Y to Accumulator
       0x98 => self.tya(),
       // TXS - Transfer X to Stack Pointer
@@ -248,10 +383,25 @@ pub const CPU = struct {
       0x10 => self.bpl(self.operand(mem, .relative)),
       // BNE - Branch if Not Equal
       0xd0 => self.bne(self.operand(mem, .relative)),
+      // BEQ - Branch if Equal
+      0xf0 => self.beq(self.operand(mem, .relative)),
+      // BCC - Branch if Carry Clear
+      0x90 => self.bcc(self.operand(mem, .relative)),
+      // BCS - Branch if Carry Set
+      0xb0 => self.bcs(self.operand(mem, .relative)),
+      // BMI - Branch if Minus
+      0x30 => self.bmi(self.operand(mem, .relative)),
       // STA - Store Accumulator
       0x8d => self.sta(mem, self.operand(mem, .absolute)),
       // CMP - Compare
       0xc9 => self.cmp(mem, self.operand(mem, .immediate)),
+      0xcd => self.cmp(mem, self.operand(mem, .absolute)),
+      // CPX - Compare X Register
+      0xe0 => self.cpx(mem, self.operand(mem, .immediate)),
+      0xec => self.cpx(mem, self.operand(mem, .absolute)),
+      // CPY - Compare Y Register
+      0xc0 => self.cpy(mem, self.operand(mem, .immediate)),
+      0xcc => self.cpy(mem, self.operand(mem, .absolute)),
       // LDA - Load Accumulator
       0xa9 => self.lda(mem, self.operand(mem, .immediate)),
       0xad => self.lda(mem, self.operand(mem, .absolute)),
@@ -261,6 +411,16 @@ pub const CPU = struct {
       0xa0 => self.ldy(self.operand(mem, .immediate)),
       // DEY - Decrement Y Register
       0x88 => self.dey(),
+      // DEX - Decrement X Register
+      0xca => self.dex(),
+      // PHA - Push Accumulator
+      0x48 => self.pha(mem),
+      // PHP - Push Processor Status
+      0x08 => self.php(mem),
+      // PLA - Pull Accumulator
+      0x68 => self.pla(mem),
+      // PLP - Pull Processor Status
+      0x28 => self.plp(mem),
       0x18 => {
         // CLC - Clear Carry Flag
         self.p.carry = false;
@@ -272,7 +432,7 @@ pub const CPU = struct {
         self.cycles += 2;
       },
       else => {
-        std.debug.print("Op code not implemented: 0x{x:0>2}\n", .{ instr });
+        std.debug.print("Op code not implemented: 0x{x:0>2} at: {x}\n", .{ instr, instr_pos });
         unreachable;
       }
     }
