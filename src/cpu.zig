@@ -35,16 +35,12 @@ pub const CPU = struct {
     return .{ .p = Flags {}, .a = 0, .x = 0, .y = 0, .sp = 0xff, .pc = 0, .cycles = 0 };
   }
 
-  pub fn jmp(self: *CPU, dst: AddrMode) void {
-    self.pc = switch (dst) {
-      .absolute => |v| v,
-      else => unreachable,
-    };
-
-    self.cycles += switch (dst) {
-      .absolute => 3,
-      else => unreachable,
-    };
+  pub fn run(self: *CPU, mem: *Mem) void {
+    var pc: u16 = 0;
+    while (self.pc != pc) {
+      pc = self.pc;
+      self.step(mem);
+    }
   }
 
   fn set_nz_flags(self: *CPU, v: u8) void {
@@ -55,6 +51,18 @@ pub const CPU = struct {
   fn set_cnz_flags(self: *CPU, v: u8, carry: bool) void {
     self.set_nz_flags(v);
     self.p.carry = carry;
+  }
+
+  fn jmp(self: *CPU, dst: AddrMode) void {
+    self.pc = switch (dst) {
+      .absolute => |v| v,
+      else => unreachable,
+    };
+
+    self.cycles += switch (dst) {
+      .absolute => 3,
+      else => unreachable,
+    };
   }
 
   fn ldx(self: *CPU, dst: AddrMode) void {
@@ -323,40 +331,6 @@ pub const CPU = struct {
     self.set_nz_flags(self.x);
   }
 
-  pub fn run(self: *CPU, mem: *Mem) void {
-    var pc: u16 = 0;
-    while (self.pc != pc) {
-      pc = self.pc;
-      self.step(mem);
-    }
-  }
-
-  pub inline fn operand(self: *CPU, mem: *Mem, comptime addrType: anytype) AddrMode {
-    switch (addrType) {
-      .absolute => {
-        const lsb: u16 = mem[self.pc];
-        const msb: u16 = mem[self.pc + 1];
-        self.pc += 2;
-
-        return .{ .absolute = (msb << 8) | lsb };
-      },
-      .immediate => {
-        const b: u8 = mem[self.pc];
-        self.pc += 1;
-        return .{ .immediate = b };
-      },
-      .relative => {
-        const b: i8 = @as(i8, @bitCast(mem[self.pc]));
-        self.pc += 1;
-        return .{ .relative = b };
-      },
-      else => {
-        @compileLog("No implementation for {s}", .{addrType});
-        unreachable;
-      }
-    }
-  }
-
   fn step(self: *CPU, mem: *Mem) void {
     const instr_pos = self.pc;
     const instr = mem[instr_pos];
@@ -433,6 +407,32 @@ pub const CPU = struct {
       },
       else => {
         std.debug.print("Op code not implemented: 0x{x:0>2} at: {x}\n", .{ instr, instr_pos });
+        unreachable;
+      }
+    }
+  }
+
+  inline fn operand(self: *CPU, mem: *Mem, comptime addrType: anytype) AddrMode {
+    switch (addrType) {
+      .absolute => {
+        const lsb: u16 = mem[self.pc];
+        const msb: u16 = mem[self.pc + 1];
+        self.pc += 2;
+
+        return .{ .absolute = (msb << 8) | lsb };
+      },
+      .immediate => {
+        const b: u8 = mem[self.pc];
+        self.pc += 1;
+        return .{ .immediate = b };
+      },
+      .relative => {
+        const b: i8 = @as(i8, @bitCast(mem[self.pc]));
+        self.pc += 1;
+        return .{ .relative = b };
+      },
+      else => {
+        @compileLog("No implementation for {s}", .{addrType});
         unreachable;
       }
     }
