@@ -516,6 +516,11 @@ pub const CPU = struct {
         self.p.carry = false;
         self.cycles += 2;
       },
+      0x78 => {
+        // SEI - Set Interrupt Disable
+        self.p.interrupt_disable = true;
+        self.cycles += 2;
+      },
       0xd8 => {
         // CLD - Clear Decimal Mode
         self.p.decimal_mode = false;
