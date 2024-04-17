@@ -522,7 +522,8 @@ pub const CPU = struct {
         self.cycles += 2;
       },
       else => {
-        std.debug.print("Op code not implemented: 0x{x:0>2} at: {x}\n", .{ instr, instr_pos });
+        const name = debug_op_code(instr);
+        std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ name, instr, instr_pos });
         unreachable;
       }
     }
