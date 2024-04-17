@@ -1,3 +1,4 @@
+const debug_op_code = @import("debug.zig").debug_op_code;
 const AddrMode = @import("addr.zig").AddrMode;
 const Mem = @import("mem.zig").Mem;
 const std = @import("std");
@@ -65,6 +66,25 @@ pub const CPU = struct {
     };
   }
 
+  fn jsr(self: *CPU, mem: *Mem, dst: AddrMode) void {
+    self.push16(mem, self.pc - 1);
+
+    self.pc = switch (dst) {
+      .absolute => |v| v,
+      else => unreachable,
+    };
+
+    self.cycles += 6;
+    // No flags affected
+  }
+
+  fn rts(self: *CPU, mem: *Mem) void {
+    self.pc = self.pop16(mem);
+
+    self.cycles += 6;
+    // No flags affected
+    }
+
   fn ldx(self: *CPU, dst: AddrMode) void {
     self.x = switch (dst) {
       .immediate => |v| v,
@@ -119,6 +139,7 @@ pub const CPU = struct {
     };
 
     // std.debug.print("{b:0>8} {b:0>8}\n", .{self.a, m});
+    // std.debug.print("{x} {x}\n", .{self.a, m});
 
     self.cycles += switch (dst) {
       .immediate => 2,
@@ -183,12 +204,14 @@ pub const CPU = struct {
     self.a = switch (dst) {
       .immediate => |v| v,
       .absolute => |v| mem[v],
+      .zeroPage => |v| mem[v],
       else => unreachable,
     };
 
     self.cycles += switch (dst) {
       .immediate => 2,
       .absolute => 4,
+      .zeroPage => 3,
       else => unreachable,
     };
 
@@ -198,6 +221,7 @@ pub const CPU = struct {
   fn sta(self: *CPU, mem: *Mem, dst: AddrMode) void {
     const addr = switch (dst) {
       .absolute => |v| v,
+      .zeroPage => |v| v,
       else => unreachable,
     };
 
@@ -205,6 +229,7 @@ pub const CPU = struct {
 
     self.cycles += switch (dst) {
       .absolute => 4,
+      .zeroPage => 3,
       else => unreachable,
     };
 
@@ -258,10 +283,12 @@ pub const CPU = struct {
     self.branch(dst, self.p.carry);
   }
 
-  fn txs(self: *CPU) void {
-    self.sp = self.x;
-    self.cycles += 2;
-    // No flags affected
+  fn bvc(self: *CPU, dst: AddrMode) void {
+    self.branch(dst, !self.p.overflow);
+  }
+
+  fn bvs(self: *CPU, dst: AddrMode) void {
+    self.branch(dst, self.p.overflow);
   }
 
   fn dey(self: *CPU) void {
@@ -278,9 +305,45 @@ pub const CPU = struct {
     self.set_nz_flags(self.x);
   }
 
+  fn lsr(self: *CPU, mem: *Mem, dst: AddrMode) void {
+    const m = switch (dst) {
+      .accumulator => self.a,
+      .absolute => |v| mem[v],
+      else => unreachable,
+    };
+
+    const bit0 = 0b1 & m;
+    const res = m / 2;
+
+    switch (dst) {
+      .accumulator => {
+        self.a = res;
+      },
+      .absolute => |v| {
+        mem[v] = res;
+      },
+      else => unreachable,
+    }
+
+    self.cycles += switch (dst) {
+      .accumulator => 2,
+      .absolute => 6,
+      else => unreachable,
+    };
+
+    self.set_cnz_flags(res, bit0 == 1);
+  }
+
   inline fn push(self: *CPU, mem: *Mem, v: u8) void {
     mem[0x0100 | @as(u16, self.sp)] = v;
     self.sp -= 1;
+  }
+
+  inline fn push16(self: *CPU, mem: *Mem, v: u16) void {
+    const msb = @as(u8, @truncate(v >> 8));
+    const lsb = @as(u8, @truncate(v));
+    self.push(mem, lsb);
+    self.push(mem, msb);
   }
 
   fn pha(self: *CPU, mem: *Mem) void {
@@ -299,6 +362,12 @@ pub const CPU = struct {
     return v;
   }
 
+  inline fn pop16(self: *CPU, mem: *Mem) u16 {
+    const msb = self.pop(mem);
+    const lsb = self.pop(mem);
+    return @as(u16, msb) << 8 | @as(u16, lsb);
+  }
+
   fn pla(self: *CPU, mem: *Mem) void {
     self.a = self.pop(mem);
     self.cycles += 4;
@@ -308,6 +377,20 @@ pub const CPU = struct {
   fn plp(self: *CPU, mem: *Mem) void {
     self.p = @bitCast(self.pop(mem));
     self.cycles += 4;
+  }
+
+
+  fn txs(self: *CPU) void {
+    self.sp = self.x;
+    self.cycles += 2;
+    // No flags affected
+  }
+
+  fn tsx(self: *CPU) void {
+    self.x = self.sp;
+    self.cycles += 2;
+
+    self.set_nz_flags(self.x);
   }
 
   fn tya(self: *CPU) void {
@@ -331,14 +414,26 @@ pub const CPU = struct {
     self.set_nz_flags(self.x);
   }
 
+  fn txa(self: *CPU) void {
+    self.a = self.x;
+    self.cycles += 2;
+
+    self.set_nz_flags(self.a);
+  }
+
   fn step(self: *CPU, mem: *Mem) void {
     const instr_pos = self.pc;
     const instr = mem[instr_pos];
     self.pc += 1;
 
     switch (instr) {
+      // JMP - Jump
       0x4c => self.jmp(self.operand(mem, .absolute)),
       // 0x6c => self.jmp(self.operand(mem, .indirect)),
+      // JSR - Jump to Subroutine
+      0x20 => self.jsr(mem, self.operand(mem, .absolute)),
+      // RTS - Return from Subroutine
+      0x60 => self.rts(mem),
       // EOR - Exclusive OR
       0x49 => self.xor(mem, self.operand(mem, .immediate)),
       0x4d => self.xor(mem, self.operand(mem, .absolute)),
@@ -351,8 +446,12 @@ pub const CPU = struct {
       0x98 => self.tya(),
       // TXS - Transfer X to Stack Pointer
       0x9a => self.txs(),
+      // TSX - Transfer Stack Pointer to X
+      0xba => self.tsx(),
       // TAX - Transfer Accumulator to X
       0xaa => self.tax(),
+      // TXA - Transfer X to Accumulator
+      0x8a => self.txa(),
       // BPL - Branch if Positive
       0x10 => self.bpl(self.operand(mem, .relative)),
       // BNE - Branch if Not Equal
@@ -363,10 +462,15 @@ pub const CPU = struct {
       0x90 => self.bcc(self.operand(mem, .relative)),
       // BCS - Branch if Carry Set
       0xb0 => self.bcs(self.operand(mem, .relative)),
+      // BVC - Branch if Overflow Clear
+      0x50 => self.bvc(self.operand(mem, .relative)),
+      // BVS - Branch if Overflow Set
+      0x70 => self.bvs(self.operand(mem, .relative)),
       // BMI - Branch if Minus
       0x30 => self.bmi(self.operand(mem, .relative)),
       // STA - Store Accumulator
       0x8d => self.sta(mem, self.operand(mem, .absolute)),
+      0x85 => self.sta(mem, self.operand(mem, .zeroPage)),
       // CMP - Compare
       0xc9 => self.cmp(mem, self.operand(mem, .immediate)),
       0xcd => self.cmp(mem, self.operand(mem, .absolute)),
@@ -379,6 +483,7 @@ pub const CPU = struct {
       // LDA - Load Accumulator
       0xa9 => self.lda(mem, self.operand(mem, .immediate)),
       0xad => self.lda(mem, self.operand(mem, .absolute)),
+      0xa5 => self.lda(mem, self.operand(mem, .zeroPage)),
       // LDX - Load X Register
       0xa2 => self.ldx(self.operand(mem, .immediate)),
       // LDY - Load Y Register
@@ -395,6 +500,17 @@ pub const CPU = struct {
       0x68 => self.pla(mem),
       // PLP - Pull Processor Status
       0x28 => self.plp(mem),
+      // LSR - Logical Shift Right
+      0x4a => self.lsr(mem, self.operand(mem, .accumulator)),
+      0x4e => self.lsr(mem, self.operand(mem, .absolute)),
+      0x1a,
+      0x3a,
+      0x5a,
+      0x7a,
+      0xea => {
+        // NOP - No Operation
+        self.cycles += 2;
+      },
       0x18 => {
         // CLC - Clear Carry Flag
         self.p.carry = false;
@@ -414,6 +530,14 @@ pub const CPU = struct {
 
   inline fn operand(self: *CPU, mem: *Mem, comptime addrType: anytype) AddrMode {
     switch (addrType) {
+      .accumulator => {
+        return .{ .accumulator = {} };
+      },
+      .zeroPage => {
+        const b: u8 = mem[self.pc];
+        self.pc += 1;
+        return .{ .zeroPage = b };
+      },
       .absolute => {
         const lsb: u16 = mem[self.pc];
         const msb: u16 = mem[self.pc + 1];
@@ -441,3 +565,18 @@ pub const CPU = struct {
 
 
 
+test "6502_functional_test" {
+  var cpu = CPU.init();
+  var mem: Mem = undefined;
+
+  const text = @embedFile("6502_functional_test.bin");
+
+  std.mem.copyForwards(u8, &mem, text);
+
+  cpu.pc = 0x0400;
+
+  cpu.run(&mem);
+  std.debug.print("\npc = {x}\n", .{ cpu.pc });
+
+  try std.testing.expectEqual(cpu.pc, 0x3399);
+}
