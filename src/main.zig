@@ -5,7 +5,7 @@ const c = @cImport({
   });
 const CPU = @import("cpu.zig").CPU;
 const Mem = @import("mem.zig").Mem;
-
+const rom = @import("rom.zig");
 
 const SCALE: comptime_int = 2;
 const WIDTH: comptime_int = 320;
@@ -14,22 +14,28 @@ const HEIGHT: comptime_int = 240;
 pub fn main() !void {
   var cpu = CPU.init();
   var mem: Mem = undefined;
+  var max_rom_buffer: [rom.MAX_SIZE]u8 = undefined;
 
-  const text = @embedFile("6502_functional_test.bin");
+  const rom_buffer = try std.fs.cwd().readFile("src/roms/sample1.nes", &max_rom_buffer);
 
-  std.mem.copyForwards(u8, &mem, text);
+  rom.load_into_memory(&mem, rom_buffer);
 
-  cpu.pc = 0x0400;
+  const reset_vector: u16 = (@as(u16, mem[0xfffd]) << 8) | @as(u16, mem[0xfffc]);
+  cpu.pc = reset_vector;
+
+  std.debug.assert(reset_vector == 0x8000);
 
   cpu.run(&mem);
 
   var buf: [WIDTH * HEIGHT]u32 = undefined;
+
   var f = std.mem.zeroInit(c.fenster, .{
     .width = WIDTH,
     .height = HEIGHT,
     .title = "hello",
     .buf = &buf[0],
-    });
+  });
+
   _ = c.fenster_open(&f);
   defer c.fenster_close(&f);
 
