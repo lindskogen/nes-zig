@@ -13,12 +13,13 @@ const HEIGHT: comptime_int = 240;
 
 pub fn main() !void {
   var cpu = CPU.init();
-  var mem: Mem = .{ .internal = undefined };
   var max_rom_buffer: [rom.MAX_SIZE]u8 = undefined;
 
   const rom_buffer = try std.fs.cwd().readFile("src/roms/sample1.nes", &max_rom_buffer);
 
-  rom.load_into_memory(&mem, rom_buffer);
+  const loaded_rom = try rom.Rom.load(rom_buffer);
+
+  var mem: Mem = Mem.init(&loaded_rom);
 
   const reset_vector: u16 = (@as(u16, mem.read(0xfffd)) << 8) | @as(u16, mem.read(0xfffc));
   cpu.pc = reset_vector;
@@ -46,6 +47,9 @@ pub fn main() !void {
     if (f.keys[27] != 0) {
       break;
     }
+
+    mem.ppu.write_to_buffer(&buf, WIDTH, HEIGHT);
+
     // Render x^y^t pattern
     for (buf, 0..) |_, i| {
       buf[i] = @as(u32, @intCast(i % WIDTH)) ^ @as(u32, @intCast(i / HEIGHT)) ^ t;

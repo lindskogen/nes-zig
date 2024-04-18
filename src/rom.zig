@@ -3,23 +3,14 @@ const Mem = @import("mem.zig").Mem;
 
 pub const MAX_SIZE = 512_000;
 
-pub fn load_into_memory(mem: *Mem, rom_buffer: []u8) void {
-  const header = try Header.parse(rom_buffer[0..16]);
-  std.debug.print("Loaded: {}\n", .{ header });
-
-  const start_offset: usize = if (header.flags6.has_trainer) (16 + 512) else 16;
-  const prg_rom_len = @as(usize, header.prg_rom_size) * 16_384;
-
-  std.mem.copyForwards(u8, mem.internal[0x8000..0xffff], rom_buffer[start_offset..(start_offset + prg_rom_len - 1)]);
-}
-
-
 const Flags6 = packed struct(u8) {
   nametable_arrangement: u1 = 0,
   battery_backed_prg_ram: bool = false,
   has_trainer: bool = false,
   _padding: u5 = 0 // TODO: Map rest of Flags6
 };
+
+pub const ParseError = error { invalidHeader };
 
 const Header = struct {
   /// Constant $4E $45 $53 $1A (ASCII "NES" followed by MS-DOS end-of-file)
@@ -41,10 +32,15 @@ const Header = struct {
   /// 11-15	Unused padding (should be filled with zero, but some rippers put their name across bytes 7-15)
   _padding: [5]u8 = undefined,
 
-
   fn parse(slice: *[16]u8) !Header {
+
+    const checksum = slice[0..4];
+    if (!std.mem.eql(u8, checksum[0..3], "NES")) {
+      return ParseError.invalidHeader;
+    }
+
     return Header {
-      .nes = slice[0..4].*,
+      .nes = checksum.*,
       .prg_rom_size = slice[4],
       .chr_rom_size = slice[5],
       .flags6 = @bitCast(slice[6]),
@@ -55,4 +51,33 @@ const Header = struct {
       ._padding = slice[11..16].*
       };
     }
+};
+
+pub const Rom = struct {
+  header: Header,
+  buffer: []u8,
+
+  start_offset_prg: usize,
+  start_offset_chr: usize,
+
+  pub fn load(rom_buffer: []u8) !Rom {
+    const header = try Header.parse(rom_buffer[0..16]);
+    const start_offset_prg: usize = if (header.flags6.has_trainer) (16 + 512) else 16;
+    const prg_rom_len = @as(usize, header.prg_rom_size) * 16_384;
+
+    return Rom {
+      .buffer = rom_buffer,
+      .header = header,
+      .start_offset_prg = start_offset_prg,
+      .start_offset_chr = start_offset_prg + prg_rom_len,
+    };
+  }
+
+  pub fn read_prg(self: *const Rom, k: u16) u8 {
+    return self.buffer[self.start_offset_prg + k];
+  }
+
+  pub fn read_chr(self: *const Rom, k: u16) u8 {
+    return self.buffer[self.start_offset_chr + k];
+  }
 };
