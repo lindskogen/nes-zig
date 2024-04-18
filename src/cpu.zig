@@ -116,7 +116,7 @@ pub const CPU = struct {
   fn adc(self: *CPU, mem: *Mem, dst: AddrMode) void {
      const m = switch (dst) {
       .immediate => |v| v,
-      .absolute => |v| mem[v],
+      .absolute => |v| mem.read(v),
       else => unreachable,
     };
 
@@ -134,7 +134,7 @@ pub const CPU = struct {
   fn cmp(self: *CPU, mem: *Mem, dst: AddrMode) void {
     const m = switch (dst) {
       .immediate => |v| v,
-      .absolute => |v| mem[v],
+      .absolute => |v| mem.read(v),
       else => unreachable,
     };
 
@@ -153,7 +153,7 @@ pub const CPU = struct {
   fn cpx(self: *CPU, mem: *Mem, dst: AddrMode) void {
     const m = switch (dst) {
       .immediate => |v| v,
-      .absolute => |v| mem[v],
+      .absolute => |v| mem.read(v),
       else => unreachable,
     };
 
@@ -169,7 +169,7 @@ pub const CPU = struct {
   fn cpy(self: *CPU, mem: *Mem, dst: AddrMode) void {
     const m = switch (dst) {
       .immediate => |v| v,
-      .absolute => |v| mem[v],
+      .absolute => |v| mem.read(v),
       else => unreachable,
     };
 
@@ -185,7 +185,7 @@ pub const CPU = struct {
   fn xor(self: *CPU, mem: *Mem, dst: AddrMode) void {
     const m = switch (dst) {
       .immediate => |v| v,
-      .absolute => |v| mem[v],
+      .absolute => |v| mem.read(v),
       else => unreachable,
     };
 
@@ -205,8 +205,8 @@ pub const CPU = struct {
       .immediate => |v| v,
       .absolute,
       .indexedAbsoluteX,
-      .indexedAbsoluteY => |v| mem[v],
-      .zeroPage => |v| mem[v],
+      .indexedAbsoluteY => |v| mem.read(v),
+      .zeroPage => |v| mem.read(v),
       else => unreachable,
     };
 
@@ -229,7 +229,7 @@ pub const CPU = struct {
       else => unreachable,
     };
 
-    mem[addr] = self.a;
+    mem.write(addr, self.a);
 
     self.cycles += switch (dst) {
       .absolute => 4,
@@ -326,7 +326,7 @@ pub const CPU = struct {
   fn lsr(self: *CPU, mem: *Mem, dst: AddrMode) void {
     const m = switch (dst) {
       .accumulator => self.a,
-      .absolute => |v| mem[v],
+      .absolute => |v| mem.read(v),
       else => unreachable,
     };
 
@@ -338,7 +338,7 @@ pub const CPU = struct {
         self.a = res;
       },
       .absolute => |v| {
-        mem[v] = res;
+        mem.write(v, res);
       },
       else => unreachable,
     }
@@ -353,7 +353,7 @@ pub const CPU = struct {
   }
 
   inline fn push(self: *CPU, mem: *Mem, v: u8) void {
-    mem[0x0100 | @as(u16, self.sp)] = v;
+    mem.write(0x0100 | @as(u16, self.sp), v);
     self.sp -= 1;
   }
 
@@ -376,7 +376,7 @@ pub const CPU = struct {
 
   inline fn pop(self: *CPU, mem: *Mem) u8 {
     self.sp += 1;
-    const v = mem[0x0100 | @as(u16, self.sp)];
+    const v = mem.read(0x0100 | @as(u16, self.sp));
     return v;
   }
 
@@ -441,7 +441,7 @@ pub const CPU = struct {
 
   fn step(self: *CPU, mem: *Mem) void {
     const instr_pos = self.pc;
-    const instr = mem[instr_pos];
+    const instr = mem.read(instr_pos);
     self.pc += 1;
 
     switch (instr) {
@@ -559,8 +559,8 @@ pub const CPU = struct {
   }
 
   inline fn read_u16(self: *CPU, mem: *Mem) u16 {
-    const lsb: u16 = mem[self.pc];
-    const msb: u16 = mem[self.pc + 1];
+    const lsb: u16 = mem.read(self.pc);
+    const msb: u16 = mem.read(self.pc + 1);
     self.pc += 2;
 
     return (msb << 8) | lsb;
@@ -572,7 +572,7 @@ pub const CPU = struct {
         return .{ .accumulator = {} };
       },
       .zeroPage => {
-        const b: u8 = mem[self.pc];
+        const b: u8 = mem.read(self.pc);
         self.pc += 1;
         return .{ .zeroPage = b };
       },
@@ -589,12 +589,12 @@ pub const CPU = struct {
         return .{ .indexedAbsoluteY = self.y + v };
       },
       .immediate => {
-        const b: u8 = mem[self.pc];
+        const b: u8 = mem.read(self.pc);
         self.pc += 1;
         return .{ .immediate = b };
       },
       .relative => {
-        const b: i8 = @as(i8, @bitCast(mem[self.pc]));
+        const b: i8 = @as(i8, @bitCast(mem.read(self.pc)));
         self.pc += 1;
         return .{ .relative = b };
       },

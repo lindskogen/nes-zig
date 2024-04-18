@@ -10,7 +10,7 @@ pub fn load_into_memory(mem: *Mem, rom_buffer: []u8) void {
   const start_offset: usize = if (header.flags6.has_trainer) (16 + 512) else 16;
   const prg_rom_len = @as(usize, header.prg_rom_size) * 16_384;
 
-  std.mem.copyForwards(u8, mem[0x8000..0xffff], rom_buffer[start_offset..(start_offset + prg_rom_len - 1)]);
+  std.mem.copyForwards(u8, mem.internal[0x8000..0xffff], rom_buffer[start_offset..(start_offset + prg_rom_len - 1)]);
 }
 
 
