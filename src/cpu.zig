@@ -203,14 +203,18 @@ pub const CPU = struct {
   fn lda(self: *CPU, mem: *Mem, dst: AddrMode) void {
     self.a = switch (dst) {
       .immediate => |v| v,
-      .absolute => |v| mem[v],
+      .absolute,
+      .indexedAbsoluteX,
+      .indexedAbsoluteY => |v| mem[v],
       .zeroPage => |v| mem[v],
       else => unreachable,
     };
 
     self.cycles += switch (dst) {
       .immediate => 2,
-      .absolute => 4,
+      .absolute,
+      .indexedAbsoluteX,
+      .indexedAbsoluteY => 4,
       .zeroPage => 3,
       else => unreachable,
     };
@@ -289,6 +293,20 @@ pub const CPU = struct {
 
   fn bvs(self: *CPU, dst: AddrMode) void {
     self.branch(dst, self.p.overflow);
+  }
+
+  fn iny(self: *CPU) void {
+    self.y +%= 1;
+    self.cycles += 2;
+
+    self.set_nz_flags(self.y);
+  }
+
+  fn inx(self: *CPU) void {
+    self.x +%= 1;
+    self.cycles += 2;
+
+    self.set_nz_flags(self.x);
   }
 
   fn dey(self: *CPU) void {
@@ -483,11 +501,17 @@ pub const CPU = struct {
       // LDA - Load Accumulator
       0xa9 => self.lda(mem, self.operand(mem, .immediate)),
       0xad => self.lda(mem, self.operand(mem, .absolute)),
+      0xbd => self.lda(mem, self.operand(mem, .indexedAbsoluteX)),
+      0xb9 => self.lda(mem, self.operand(mem, .indexedAbsoluteY)),
       0xa5 => self.lda(mem, self.operand(mem, .zeroPage)),
       // LDX - Load X Register
       0xa2 => self.ldx(self.operand(mem, .immediate)),
       // LDY - Load Y Register
       0xa0 => self.ldy(self.operand(mem, .immediate)),
+      // INX - Increment X Register
+      0xe8 => self.inx(),
+      // INY - Increment Y Register
+      0xc8 => self.iny(),
       // DEY - Decrement Y Register
       0x88 => self.dey(),
       // DEX - Decrement X Register
@@ -534,6 +558,14 @@ pub const CPU = struct {
     }
   }
 
+  inline fn read_u16(self: *CPU, mem: *Mem) u16 {
+    const lsb: u16 = mem[self.pc];
+    const msb: u16 = mem[self.pc + 1];
+    self.pc += 2;
+
+    return (msb << 8) | lsb;
+  }
+
   inline fn operand(self: *CPU, mem: *Mem, comptime addrType: anytype) AddrMode {
     switch (addrType) {
       .accumulator => {
@@ -545,11 +577,16 @@ pub const CPU = struct {
         return .{ .zeroPage = b };
       },
       .absolute => {
-        const lsb: u16 = mem[self.pc];
-        const msb: u16 = mem[self.pc + 1];
-        self.pc += 2;
-
-        return .{ .absolute = (msb << 8) | lsb };
+        const v = self.read_u16(mem);
+        return .{ .absolute = v };
+      },
+      .indexedAbsoluteX => {
+        const v = self.read_u16(mem);
+        return .{ .indexedAbsoluteX = self.x + v };
+      },
+      .indexedAbsoluteY => {
+        const v = self.read_u16(mem);
+        return .{ .indexedAbsoluteY = self.y + v };
       },
       .immediate => {
         const b: u8 = mem[self.pc];
