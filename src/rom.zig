@@ -57,27 +57,29 @@ pub const Rom = struct {
   header: Header,
   buffer: []u8,
 
-  start_offset_prg: usize,
-  start_offset_chr: usize,
+  prg_slice: []u8,
+  chr_slice: []u8,
 
   pub fn load(rom_buffer: []u8) !Rom {
     const header = try Header.parse(rom_buffer[0..16]);
     const start_offset_prg: usize = if (header.flags6.has_trainer) (16 + 512) else 16;
     const prg_rom_len = @as(usize, header.prg_rom_size) * 16_384;
+    const chr_rom_start = start_offset_prg + prg_rom_len;
+    const chr_rom_len = @as(usize, header.chr_rom_size) * 8192;
 
     return Rom {
       .buffer = rom_buffer,
       .header = header,
-      .start_offset_prg = start_offset_prg,
-      .start_offset_chr = start_offset_prg + prg_rom_len,
+      .prg_slice = rom_buffer[start_offset_prg..(start_offset_prg + prg_rom_len)],
+      .chr_slice = rom_buffer[chr_rom_start..(chr_rom_start + chr_rom_len)],
     };
   }
 
   pub fn read_prg(self: *const Rom, k: u16) u8 {
-    return self.buffer[self.start_offset_prg + k];
+    return self.prg_slice[k];
   }
 
   pub fn read_chr(self: *const Rom, k: u16) u8 {
-    return self.buffer[self.start_offset_chr + k];
+    return self.chr_slice[k];
   }
 };
