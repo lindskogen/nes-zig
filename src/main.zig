@@ -3,8 +3,7 @@ const c = @cImport({
   @cDefine("FENSTER_HEADER", {});
   @cInclude("fenster.h");
   });
-const CPU = @import("cpu.zig").CPU;
-const Mem = @import("mem.zig").Mem;
+const Bus = @import("bus.zig").Bus;
 const rom = @import("rom.zig");
 
 const SCALE: comptime_int = 2;
@@ -12,21 +11,18 @@ const WIDTH: comptime_int = 320;
 const HEIGHT: comptime_int = 240;
 
 pub fn main() !void {
-  var cpu = CPU.init();
   var max_rom_buffer: [rom.MAX_SIZE]u8 = undefined;
 
-  const rom_buffer = try std.fs.cwd().readFile("src/roms/sample1.nes", &max_rom_buffer);
+  const rom_buffer = try std.fs.cwd().readFile("src/roms/nestest.nes", &max_rom_buffer);
 
   const loaded_rom = try rom.Rom.load(rom_buffer);
 
-  var mem: Mem = Mem.init(&loaded_rom);
+  var nes: Bus = Bus.init();
+  nes.cpu.bus = &nes;
 
-  const reset_vector: u16 = (@as(u16, mem.read(0xfffd)) << 8) | @as(u16, mem.read(0xfffc));
-  cpu.pc = reset_vector;
+  nes.load_rom(&loaded_rom);
 
-  std.debug.assert(reset_vector == 0x8000);
-
-  cpu.run(&mem);
+  nes.reset();
 
   var buf: [WIDTH * HEIGHT]u32 = undefined;
 
@@ -48,7 +44,7 @@ pub fn main() !void {
       break;
     }
 
-    mem.ppu.write_to_buffer(&buf, WIDTH, HEIGHT);
+    nes.clock();
 
     // Render x^y^t pattern
     for (buf, 0..) |_, i| {

@@ -1,5 +1,4 @@
 const std = @import("std");
-const Mem = @import("mem.zig").Mem;
 
 pub const MAX_SIZE = 512_000;
 
@@ -35,7 +34,7 @@ const Header = struct {
   fn parse(slice: *[16]u8) !Header {
 
     const checksum = slice[0..4];
-    if (!std.mem.eql(u8, checksum[0..3], "NES")) {
+    if (!std.mem.eql(u8, checksum, "NES\x1a")) {
       return ParseError.invalidHeader;
     }
 
@@ -75,11 +74,41 @@ pub const Rom = struct {
     };
   }
 
-  pub fn read_prg(self: *const Rom, k: u16) u8 {
-    return self.prg_slice[k];
+  pub fn read_prg(self: *const Rom, k: u16) ?u8 {
+
+    if (k >= 0x8000 and k <= 0xffff) {
+      const mask: u16 = if (self.header.prg_rom_size > 1) 0x7fff else 0x3fff;
+      const addr: u16 = k & mask;
+      return self.prg_slice[addr];
+    }
+
+    return null;
   }
 
-  pub fn read_chr(self: *const Rom, k: u16) u8 {
-    return self.chr_slice[k];
+  pub fn write_prg(self: *const Rom, k: u16, v: u8) bool {
+    if (k >= 0x8000 and k <= 0xffff) {
+      const mask: u16 = if (self.header.prg_rom_size > 1) 0x7fff else 0x3fff;
+      const addr: u16 = k & mask;
+      self.prg_slice[addr] = v;
+      return true;
+    }
+    return false;
+  }
+
+  pub fn read_chr(self: *const Rom, k: u16) ?u8 {
+    if (k >= 0x0000 and k <= 0x1FFF) {
+      return self.chr_slice[k];
+    }
+    return null;
+  }
+
+  pub fn write_chr(self: *const Rom, k: u16, v: u8) bool {
+    if (k >= 0x0000 and k <= 0x1FFF) {
+      if (self.header.chr_rom_size == 0) {
+        self.chr_slice[k] = v;
+        return true;
+      }
+    }
+    return false;
   }
 };

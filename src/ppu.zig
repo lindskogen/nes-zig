@@ -39,39 +39,131 @@ pub const PPU = struct {
   internal: [0x4000]u8,
   ctrl: PPUCtrl,
   mask: u8, // TODO map this
-  rom: *const Rom,
+  rom: ?*const Rom,
 
   addr: u16,
   scroll: u16,
 
+  nameTable: [2][1024]u8,
+  patternTable: [2][4096]u8,
+  paletteTable: [32]u8,
+
+  scanline: i16,
+  cycle: i16,
+
   w: WriteLatch,
 
-  pub fn init(rom: *const Rom) PPU {
-    return PPU { .rom = rom, .internal = undefined, .ctrl = @bitCast(@as(u8, 0)), .w = .msb, .addr = 0, .scroll = 0, .mask = 0 };
-  }
-
-  pub fn write_vram(self: *PPU, v: u8) void {
-    self.internal[self.addr] = v;
-    self.addr += self.ctrl.get_vram_increment();
-  }
-
-  pub fn read_vram(self: *PPU) u8 {
-    defer self.addr += self.ctrl.get_vram_increment();
-    return self.read(self.addr);
-  }
-
-  fn read(self: *PPU, addr: u16) u8 {
-    var a = addr % 0x4000;
-    if (a > 0x3f20) {
-      a -= 0x1f;
-    } else if (a < 0x3f00 and a >= 0x3000) {
-      a -= 0x3000;
-    }
-
-    return switch (a) {
-      0x0000...0x1fff => self.rom.read_chr(a),
-      else => self.internal[addr]
+  pub fn init() PPU {
+    return PPU {
+      .rom = null,
+      .internal = undefined,
+      .ctrl = @bitCast(@as(u8, 0)),
+      .w = .msb,
+      .addr = 0,
+      .scroll = 0,
+      .mask = 0,
+      .nameTable = undefined,
+      .patternTable = undefined,
+      .paletteTable = undefined,
+      .scanline = 0,
+      .cycle = 0
     };
+  }
+
+  pub fn load_rom(self: *PPU, rom: *const Rom) void {
+    self.rom = rom;
+  }
+
+  pub fn clock(self: *PPU) void {
+    self.cycle += 1;
+
+    if (self.cycle >= 341) {
+      self.cycle = 0;
+      self.scanline += 1;
+      if (self.scanline >= 261) {
+        self.scanline = -1;
+      }
+    }
+  }
+
+  pub fn cpu_read(self: *PPU, k: u16) u8 {
+    return switch (k) {
+      0x2000 => @bitCast(self.ctrl),
+      0x2001 => @bitCast(self.mask),
+      0x2005 => unreachable,
+      0x2006 => unreachable,
+      0x2007 => a: {
+        // const r = self.read(self.addr);
+        // self.addr += self.ctrl.get_vram_increment();
+        break :a 0xaa;
+      },
+      else => a: {
+        break :a 0xaa;
+      }
+    };
+  }
+
+  pub fn cpu_write(self: *PPU, k: u16, v: u8) void {
+    switch (k) {
+      0x2000 => {
+        self.ctrl = @bitCast(v);
+      },
+      0x2001 => {
+        self.mask = v;
+      },
+      0x2005 => {
+        if (self.w == .msb) {
+          self.scroll = (@as(u16, v) << 8) | @as(u8, @truncate(self.scroll));
+          self.w = .lsb;
+        } else {
+          self.scroll = @as(u16, v) | @as(u8, @truncate(self.scroll >> 8));
+          self.w = .msb;
+        }
+      },
+      0x2006 => {
+        if (self.w == .msb) {
+          self.addr = (@as(u16, v) << 8) | @as(u8, @truncate(self.addr));
+          self.w = .lsb;
+        } else {
+          self.addr = @as(u16, v) | @as(u8, @truncate(self.addr >> 8));
+          self.w = .msb;
+        }
+      },
+      0x2007 => {
+        self.internal[self.addr] = v;
+        self.addr += self.ctrl.get_vram_increment();
+      },
+      0x2004 => {
+        std.debug.print("DMA {x} {x}\n", .{ k, v });
+        unreachable;
+      },
+      0x4014 => {
+        std.debug.print("DMA {x} {x}\n", .{ k, v });
+        unreachable;
+      },
+      else => {
+      }
+    }
+  }
+
+  pub fn ppu_read(self: *PPU, addr: u16) u8 {
+    const k = addr & 0x3fff;
+
+    if (self.rom.?.read_chr(k)) |v| {
+      return v;
+    } else {
+      return 0xaa;
+    }
+  }
+
+  pub fn ppu_write(self: *PPU, addr: u16) u8 {
+    const k = addr & 0x3fff;
+
+    if (self.rom.?.read_chr(k)) |v| {
+      return v;
+    } else {
+      return 0xaa;
+    }
   }
 
   pub fn write_to_buffer(self: *PPU, buffer: []u32, comptime width: usize, comptime height: usize) void  {
