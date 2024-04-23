@@ -44,6 +44,8 @@ pub const PPU = struct {
   addr: u16,
   scroll: u16,
 
+  data_buffer: u8,
+
   nameTable: [2][1024]u8,
   patternTable: [2][4096]u8,
   paletteTable: [32]u8,
@@ -66,7 +68,8 @@ pub const PPU = struct {
       .patternTable = undefined,
       .paletteTable = undefined,
       .scanline = 0,
-      .cycle = 0
+      .cycle = 0,
+      .data_buffer = 0
     };
   }
 
@@ -88,14 +91,20 @@ pub const PPU = struct {
 
   pub fn cpu_read(self: *PPU, k: u16) u8 {
     return switch (k) {
-      0x2000 => @bitCast(self.ctrl),
-      0x2001 => @bitCast(self.mask),
-      0x2005 => unreachable,
-      0x2006 => unreachable,
-      0x2007 => a: {
-        // const r = self.read(self.addr);
-        // self.addr += self.ctrl.get_vram_increment();
-        break :a 0xaa;
+      0x0000 => @bitCast(self.ctrl),
+      0x0001 => @bitCast(self.mask),
+      0x0005 => unreachable,
+      0x0006 => unreachable,
+      0x0007 => a: {
+        var d = self.data_buffer;
+
+        self.data_buffer = self.ppu_read(self.addr);
+        if (self.addr >= 0x3f00) {
+          d = self.data_buffer;
+        }
+
+        self.addr += self.ctrl.get_vram_increment();
+        break :a d;
       },
       else => a: {
         break :a 0xaa;
@@ -105,13 +114,13 @@ pub const PPU = struct {
 
   pub fn cpu_write(self: *PPU, k: u16, v: u8) void {
     switch (k) {
-      0x2000 => {
+      0x0000 => {
         self.ctrl = @bitCast(v);
       },
-      0x2001 => {
+      0x0001 => {
         self.mask = v;
       },
-      0x2005 => {
+      0x0005 => {
         if (self.w == .msb) {
           self.scroll = (@as(u16, v) << 8) | @as(u8, @truncate(self.scroll));
           self.w = .lsb;
@@ -120,7 +129,7 @@ pub const PPU = struct {
           self.w = .msb;
         }
       },
-      0x2006 => {
+      0x0006 => {
         if (self.w == .msb) {
           self.addr = (@as(u16, v) << 8) | @as(u8, @truncate(self.addr));
           self.w = .lsb;
@@ -129,15 +138,11 @@ pub const PPU = struct {
           self.w = .msb;
         }
       },
-      0x2007 => {
-        self.internal[self.addr] = v;
+      0x0007 => {
+        self.ppu_write(self.addr, v);
         self.addr += self.ctrl.get_vram_increment();
       },
-      0x2004 => {
-        std.debug.print("DMA {x} {x}\n", .{ k, v });
-        unreachable;
-      },
-      0x4014 => {
+      0x0004 => {
         std.debug.print("DMA {x} {x}\n", .{ k, v });
         unreachable;
       },
@@ -147,60 +152,186 @@ pub const PPU = struct {
   }
 
   pub fn ppu_read(self: *PPU, addr: u16) u8 {
-    const k = addr & 0x3fff;
+    var k = addr & 0x3fff;
 
     if (self.rom.?.read_chr(k)) |v| {
       return v;
-    } else {
-      return 0xaa;
-    }
-  }
+    } else if (k >= 0x0000 and k <= 0x1fff) {
+      return self.patternTable[(k & 0x1000) >> 12][addr & 0x0fff];
+    } else if (k >= 0x2000 and k <= 0x3eff) {
+      k &= 0x0fff;
 
-  pub fn ppu_write(self: *PPU, addr: u16) u8 {
-    const k = addr & 0x3fff;
-
-    if (self.rom.?.read_chr(k)) |v| {
-      return v;
-    } else {
-      return 0xaa;
-    }
-  }
-
-  pub fn write_to_buffer(self: *PPU, buffer: []u32, comptime width: usize, comptime height: usize) void  {
-    for (0..30) |y| {
-      for (0..32) |x| {
-        const v: u16 = @intCast(x);
-
-        // Fetch a nametable entry from $2000-$2FFF.
-        const tile_address: u16 = @intCast(0x2000 | (v & 0x0FFF));
-        const tile = self.read(tile_address);
-        _ = tile;
-
-
-        // Fetch the corresponding attribute table entry from $23C0-$2FFF and
-        const attribute_address: u16 = 0x23C0 | (v & 0x0C00) | ((v >> 4) & 0x38) | ((v >> 2) & 0x07);
-        const attribute = self.read(attribute_address);
-        _ = attribute;
-        // TODO: increment the current VRAM address within the same row.
-
-        // Fetch the low-order byte of an 8x1 pixel sliver of pattern table from $0000-$0FF7 or $1000-$1FF7.
-        const bg_table_offset = @as(u16, @intCast(self.ctrl.background_pattern_table_address)) * 0x1000;
-        const lsb_sliver_addr = bg_table_offset + 0x00;
-        const lsb = self.read(lsb_sliver_addr);
-        _ = lsb;
-
-        // Fetch the high-order byte of this sliver from an address 8 bytes higher.
-        const msb_sliver_addr = bg_table_offset + 8;
-        const msb = self.read(msb_sliver_addr);
-        _ = msb;
-
-
-        // Turn the attribute data and the pattern table data into palette indices, and combine them with data from sprite data using priority.
-
-        _ = buffer[y + x + width + height];
+      if (self.rom.?.header.flags6.vertically_mirrored) {
+        return switch (k) {
+          0x0000...0x03ff => self.nameTable[0][k & 0x03ff],
+          0x0400...0x07ff => self.nameTable[1][k & 0x03ff],
+          0x0800...0x0bff => self.nameTable[0][k & 0x03ff],
+          0x0C00...0x0fff => self.nameTable[1][k & 0x03ff],
+        else => unreachable,
+        };
+      } else {
+        return switch (k) {
+          0x0000...0x03ff => self.nameTable[0][k & 0x03ff],
+          0x0400...0x07ff => self.nameTable[0][k & 0x03ff],
+          0x0800...0x0bff => self.nameTable[1][k & 0x03ff],
+          0x0C00...0x0fff => self.nameTable[1][k & 0x03ff],
+          else => unreachable,
+        };
       }
-      // TODO: It also does a fetch of a 34th (nametable, attribute, pattern) tuple that is never used, but some mappers rely on this fetch for timing purposes.
-    }
 
+    } else if (k >= 0x3f00 and k <= 0x3fff) {
+      k &= 0x001f;
+      k = switch (k) {
+        0x0010 => 0x0000,
+        0x0014 => 0x0004,
+        0x0018 => 0x0008,
+        0x001c => 0x000c,
+        else => k
+      };
+      return self.paletteTable[k]; // TODO mask with grayscale
+    } else {
+      unreachable;
+    }
   }
+
+  pub fn ppu_write(self: *PPU, addr: u16, v: u8) void {
+    var k = addr & 0x3fff;
+
+    if (self.rom.?.write_chr(k, v)) {
+
+    } else if (k >= 0x0000 and k <= 0x1fff) {
+      self.patternTable[(k & 0x1000) >> 12][k & 0x0fff] = v;
+    } else if (k >= 0x2000 and k <= 0x3eff) {
+      k &= 0x0fff;
+
+      if (self.rom.?.header.flags6.vertically_mirrored) {
+        switch (k) {
+          0x0000...0x03ff => self.nameTable[0][k & 0x03ff] = v,
+          0x0400...0x07ff => self.nameTable[1][k & 0x03ff] = v,
+          0x0800...0x0bff => self.nameTable[0][k & 0x03ff] = v,
+          0x0C00...0x0fff => self.nameTable[1][k & 0x03ff] = v,
+          else => unreachable,
+        }
+      } else {
+        switch (k) {
+          0x0000...0x03ff => self.nameTable[0][k & 0x03ff] = v,
+          0x0400...0x07ff => self.nameTable[0][k & 0x03ff] = v,
+          0x0800...0x0bff => self.nameTable[1][k & 0x03ff] = v,
+          0x0C00...0x0fff => self.nameTable[1][k & 0x03ff] = v,
+          else => unreachable,
+        }
+      }
+
+    } else if (k >= 0x3f00 and k <= 0x3fff) {
+      k &= 0x001f;
+      k = switch (k) {
+        0x0010 => 0x0000,
+        0x0014 => 0x0004,
+        0x0018 => 0x0008,
+        0x001c => 0x000c,
+        else => k
+      };
+
+      self.paletteTable[k] = v;
+    }
+  }
+
+  fn get_color_from_palette_ram(self: *PPU, palette: u8, pixel: u8) u32 {
+    const idx = self.ppu_read(0x3f00 + (@as(u16, @intCast(palette)) << 2) + @as(u16, @intCast(pixel))) & 0x3f;
+
+    return nesPalette[idx];
+  }
+
+  pub fn get_pattern_table(self: *PPU, i: u8, palette: u8, buf: []u32) void {
+    const ii = @as(u16, @intCast(i));
+    for (0..16) |ty| {
+      for (0..16) |tx| {
+        const offset: u16 = @as(u16, @intCast(ty)) * 256 + @as(u16, @intCast(tx)) * 16;
+
+        for (0..8) |row| {
+          var tile_lsb: u8 = self.ppu_read(ii * 0x1000 + offset + @as(u16, @intCast(row)) + 0);
+          var tile_msb: u8 = self.ppu_read(ii * 0x1000 + offset + @as(u16, @intCast(row)) + 8);
+
+          for (0..8) |col| {
+            const pixel: u2 = @truncate((tile_lsb & 0x01) + (tile_msb & 0x01));
+            tile_lsb >>= 1;
+            tile_msb >>= 1;
+
+            const x = tx * 8 + (7 - col);
+            const y = ty * 8 + row;
+
+            buf[y * 256 + x] = self.get_color_from_palette_ram(palette, pixel);
+          }
+        }
+      }
+    }
+  }
+};
+
+
+const nesPalette = [_]u32{
+  0x757575,
+  0x271B8F,
+  0x0000AB,
+  0x47009F,
+  0x8F0077,
+  0xAB0013,
+  0xA70000,
+  0x7F0B00,
+  0x432F00,
+  0x004700,
+  0x005100,
+  0x003F17,
+  0x1B3F5F,
+  0x000000,
+  0x000000,
+  0x000000,
+  0xBCBCBC,
+  0x0073EF,
+  0x233BEF,
+  0x8300F3,
+  0xBF00BF,
+  0xE7005B,
+  0xDB2B00,
+  0xCB4F0F,
+  0x8B7300,
+  0x009700,
+  0x00AB00,
+  0x00933B,
+  0x00838B,
+  0x000000,
+  0x000000,
+  0x000000,
+  0xFFFFFF,
+  0x3FBFFF,
+  0x5F97FF,
+  0xA78BFD,
+  0xF77BFF,
+  0xFF77B7,
+  0xFF7763,
+  0xFF9B3B,
+  0xF3BF3F,
+  0x83D313,
+  0x4FDF4B,
+  0x58F898,
+  0x00EBDB,
+  0x000000,
+  0x000000,
+  0x000000,
+  0xFFFFFF,
+  0xABE7FF,
+  0xC7D7FF,
+  0xD7CBFF,
+  0xFFC7FF,
+  0xFFC7DB,
+  0xFFBFB3,
+  0xFFDBAB,
+  0xFFE7A3,
+  0xE3FFA3,
+  0xABF3BF,
+  0xB3FFCF,
+  0x9FFFF3,
+  0x000000,
+  0x000000,
+  0x000000
 };

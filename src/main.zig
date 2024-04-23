@@ -7,7 +7,7 @@ const Bus = @import("bus.zig").Bus;
 const rom = @import("rom.zig");
 
 const SCALE: comptime_int = 2;
-const WIDTH: comptime_int = 320;
+const WIDTH: comptime_int = 256;
 const HEIGHT: comptime_int = 240;
 
 pub fn main() !void {
@@ -36,6 +36,8 @@ pub fn main() !void {
   _ = c.fenster_open(&f);
   defer c.fenster_close(&f);
 
+  var palette: u8 = 0x00;
+
   var t: u32 = 0;
   var now: i64 = c.fenster_time();
   while (c.fenster_loop(&f) == 0) {
@@ -44,12 +46,17 @@ pub fn main() !void {
       break;
     }
 
+    if (f.keys[80] != 0) {
+      palette += 1;
+      palette &= 0x07;
+    }
+
     nes.clock();
 
-    // Render x^y^t pattern
-    for (buf, 0..) |_, i| {
-      buf[i] = @as(u32, @intCast(i % WIDTH)) ^ @as(u32, @intCast(i / HEIGHT)) ^ t;
-    }
+    nes.ppu.get_pattern_table(0, palette, &buf);
+    nes.ppu.get_pattern_table(1, palette, &buf);
+    // nes.ppu.get_pattern_table(1, 0x00, &buf);
+
     t +%= 1;
     // Keep ~60 FPS
     const diff: i64 = 1000 / 60 - (c.fenster_time() - now);

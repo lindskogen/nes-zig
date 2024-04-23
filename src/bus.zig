@@ -34,18 +34,15 @@ pub const Bus = struct {
     if (self.rom.?.write_prg(k, v)) {
 
       // ROM handled write
-      return;
 
     } else if (k >= 0x0000 and k <= 0x1fff) {
       self.ram[k & 0x07ff] = v;
-      return;
     } else if (k >= 0x2000 and k <= 0x3fff) {
       self.ppu.cpu_write(k & 0x0007, v);
-      return;
+    } else {
+      std.log.debug("Unmapped write bus {x}", .{ k });
+      unreachable;
     }
-
-    std.log.debug("Unmapped write bus {x}", .{ k });
-    unreachable;
   }
 
   pub fn read(self: *Bus, k: u16) u8 {

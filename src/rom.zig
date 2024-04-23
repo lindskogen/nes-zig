@@ -3,7 +3,7 @@ const std = @import("std");
 pub const MAX_SIZE = 512_000;
 
 const Flags6 = packed struct(u8) {
-  nametable_arrangement: u1 = 0,
+  vertically_mirrored: bool = false,
   battery_backed_prg_ram: bool = false,
   has_trainer: bool = false,
   _padding: u5 = 0 // TODO: Map rest of Flags6

@@ -289,6 +289,46 @@ pub const CPU = struct {
     // No flags affected
   }
 
+  fn stx(self: *CPU, dst: AddrMode) void {
+    const addr = switch (dst) {
+      .absolute => |v| v,
+      .zeroPage => |v| v,
+      .indexedZeroPageY => |v| v,
+      else => unreachable,
+    };
+
+    self.bus.?.write(addr, self.x);
+
+    self.cycles += switch (dst) {
+      .absolute => 4,
+      .indexedZeroPageY => 4,
+      .zeroPage => 3,
+      else => unreachable,
+    };
+
+    // No flags affected
+  }
+
+  fn sty(self: *CPU, dst: AddrMode) void {
+    const addr = switch (dst) {
+      .absolute => |v| v,
+      .zeroPage => |v| v,
+      .indexedZeroPageX => |v| v,
+      else => unreachable,
+    };
+
+    self.bus.?.write(addr, self.y);
+
+    self.cycles += switch (dst) {
+      .absolute => 4,
+      .indexedZeroPageX => 4,
+      .zeroPage => 3,
+      else => unreachable,
+    };
+
+    // No flags affected
+  }
+
   inline fn branch(self: *CPU, dst: anytype, cond: bool) void {
     const addr = switch (dst) {
       .relative => |v| v,
@@ -538,6 +578,14 @@ pub const CPU = struct {
       // STA - Store Accumulator
       0x8d => self.sta(self.operand(.absolute)),
       0x85 => self.sta(self.operand(.zeroPage)),
+      // STX - Store X Register
+      0x86 => self.stx(self.operand(.zeroPage)),
+      0x96 => self.stx(self.operand(.indexedZeroPageY)),
+      0x8e => self.stx(self.operand(.absolute)),
+      // STY - Store Y Register
+      0x84 => self.sty(self.operand(.zeroPage)),
+      0x94 => self.sty(self.operand(.indexedZeroPageX)),
+      0x8c => self.sty(self.operand(.absolute)),
       // CMP - Compare
       0xc9 => self.cmp(self.operand(.immediate)),
       0xcd => self.cmp(self.operand(.absolute)),
@@ -624,6 +672,16 @@ pub const CPU = struct {
         const b: u8 = self.bus.?.read(self.pc);
         self.pc += 1;
         return .{ .zeroPage = b };
+      },
+      .indexedZeroPageX => {
+        const v: u8 = self.bus.?.read(self.pc);
+        self.pc += 1;
+        return .{ .indexedZeroPageX = self.x + v };
+      },
+      .indexedZeroPageY => {
+        const v: u8 = self.bus.?.read(self.pc);
+        self.pc += 1;
+        return .{ .indexedZeroPageY = self.y + v };
       },
       .absolute => {
         const v = self.read_u16_operand();
