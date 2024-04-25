@@ -1,4 +1,4 @@
-const debug_op_code = @import("debug.zig").debug_op_code;
+const cpu_debug = @import("debug.zig");
 const AddrMode = @import("addr.zig").AddrMode;
 const Bus = @import("bus.zig").Bus;
 const rom = @import("rom.zig");
@@ -55,7 +55,7 @@ pub const CPU = struct {
     self.x = 0;
     self.y = 0;
     self.sp = 0xfd;
-    self.p =  Flags {};
+    self.p = Flags {};
 
     self.pc = self.read_u16(0xfffc);
 
@@ -88,7 +88,10 @@ pub const CPU = struct {
 
   pub fn rti(self: *CPU) void {
     self.p = @bitCast(self.pop());
-    // TODO: restore flags B & U?
+
+    self.p.break_command = false;
+    self.p._padding = 0;
+
     self.pc = self.pop16();
     self.cycles += 6;
   }
@@ -136,7 +139,7 @@ pub const CPU = struct {
   }
 
   fn jsr(self: *CPU, dst: AddrMode) void {
-    self.push16(self.pc - 1);
+    self.push16(self.pc);
 
     self.pc = switch (dst) {
       .absolute => |v| v,
@@ -489,6 +492,22 @@ pub const CPU = struct {
     self.set_cnz_flags(res, bit0 == 1);
   }
 
+  fn bit(self: *CPU, dst: AddrMode) void {
+    const m = self.eval_operand_value(dst);
+
+    const res = self.a & m;
+
+    self.cycles += switch (dst) {
+      .zeroPage => 2,
+      .absolute => 3,
+      else => unreachable,
+    };
+
+    self.p.zero = res == 0;
+    self.p.overflow = (m & (1 << 6)) != 0;
+    self.p.negative = (m & (1 << 7)) != 0;
+  }
+
   inline fn push(self: *CPU, v: u8) void {
     self.bus.?.write(0x0100 | @as(u16, self.sp), v);
     self.sp -= 1;
@@ -514,6 +533,7 @@ pub const CPU = struct {
   inline fn pop(self: *CPU) u8 {
     self.sp += 1;
     const v = self.bus.?.read(0x0100 | @as(u16, self.sp));
+
     return v;
   }
 
@@ -579,8 +599,23 @@ pub const CPU = struct {
   fn step(self: *CPU) void {
     const instr_pos = self.pc;
     const instr = self.bus.?.read(instr_pos);
-    const name = debug_op_code(instr);
+    const name = cpu_debug.debug_op_code(instr);
     self.pc += 1;
+
+    if (self.debug) |writer| {
+      writer.print("{X:0>4}  {X:0>2}{s:<8}{s:<32}A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2} PPU:  0,    CYC:{d}\n", .{
+        instr_pos,
+        instr,
+        "",
+        name,
+        self.a,
+        self.x,
+        self.y,
+        @as(u8, @bitCast(self.p)),
+        self.sp,
+        self.cycles
+      }) catch unreachable;
+    }
 
     switch (instr) {
       // BRK - Force Interrupt
@@ -700,6 +735,9 @@ pub const CPU = struct {
       0x68 => self.pla(),
       // PLP - Pull Processor Status
       0x28 => self.plp(),
+      // BIT - Bit Test
+      0x24 => self.bit(self.operand(.zeroPage)),
+      0x2c => self.bit(self.operand(.absolute)),
       // LSR - Logical Shift Right
       0x4a => self.lsr(self.operand(.accumulator)),
       0x4e => self.lsr(self.operand(.absolute)),
@@ -723,6 +761,11 @@ pub const CPU = struct {
         self.p.carry = false;
         self.cycles += 2;
       },
+      0x38 => {
+        // SEC - Set Carry Flag
+        self.p.carry = true;
+        self.cycles += 2;
+      },
       0x78 => {
         // SEI - Set Interrupt Disable
         self.p.interrupt_disable = true;
@@ -737,10 +780,6 @@ pub const CPU = struct {
         std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ name, instr, instr_pos });
         unreachable;
       }
-    }
-
-    if (self.debug) |writer| {
-      writer.print("{X:0>4}  {X:0>2}{s}A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2} PPU:  0,    CYC:{d}\n", .{ instr_pos, instr, " " ** 43, self.a, self.x, self.y, @as(u8, @bitCast(self.p)), self.sp, self.cycles }) catch unreachable;
     }
   }
 
@@ -826,10 +865,13 @@ test "6502_functional_test" {
 
   nes.reset();
 
-
   nes.cpu.pc = 0x0400;
 
-  try std.testing.expectEqual(nes.cpu.pc, 0x3399);
+  while (nes.cpu.pc != 0x3399) {
+    nes.clock();
+  }
+
+  try std.testing.expectEqual(0x3399, nes.cpu.pc);
 }
 
 
@@ -854,7 +896,7 @@ test "nestest" {
 
   nes.reset();
 
-  nes.cpu.pc = 0x8000;
+  nes.cpu.pc = 0xC000;
 
   while (nes.cpu.pc != 0xC66E) {
     nes.clock();
