@@ -123,6 +123,18 @@ pub const CPU = struct {
     };
   }
 
+  fn brk(self: *CPU) void {
+    self.p.interrupt_disable = true;
+    self.push16(self.pc);
+
+    self.p.break_command = true;
+    self.push(@bitCast(self.p));
+    self.p.break_command = false;
+
+    self.pc = self.read_u16(0xfffe);
+    self.cycles += 7;
+  }
+
   fn jsr(self: *CPU, dst: AddrMode) void {
     self.push16(self.pc - 1);
 
@@ -691,12 +703,19 @@ pub const CPU = struct {
       // LSR - Logical Shift Right
       0x4a => self.lsr(self.operand(.accumulator)),
       0x4e => self.lsr(self.operand(.absolute)),
+      0xc2,
       0x1a,
       0x3a,
       0x5a,
       0x7a,
       0xea => {
         // NOP - No Operation
+        self.cycles += 2;
+      },
+      0x80 => {
+        // NOP - Unofficial 2-byte No Operation
+        std.debug.print("Unofficial 2-byte NOP?", .{ });
+        self.pc += 1;
         self.cycles += 2;
       },
       0x18 => {
