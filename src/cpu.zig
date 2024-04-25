@@ -8,14 +8,14 @@ inline fn is_negative(v: u8) bool {
 }
 
 const Flags = packed struct(u8) {
-  negative: bool = false,
-  overflow: bool = false,
-  _padding: u1 = 1,
-  break_command: bool = false,
-  decimal_mode: bool = false,
-  interrupt_disable: bool = false,
-  zero: bool = false,
   carry: bool = false,
+  zero: bool = false,
+  interrupt_disable: bool = false,
+  decimal_mode: bool = false,
+  break_command: bool = false,
+  _padding: u1 = 1,
+  overflow: bool = false,
+  negative: bool = false,
 };
 
 pub const CPU = struct {
