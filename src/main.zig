@@ -58,10 +58,17 @@ pub fn main() !void {
     }
 
     nes.clock();
+    while (!nes.cpu.complete()) {
+      nes.clock();
+    }
 
-    nes.ppu.get_pattern_table(0, palette, &buf);
-    nes.ppu.get_pattern_table(1, palette, &buf);
-    // nes.ppu.get_pattern_table(1, 0x00, &buf);
+    nes.clock();
+    while (nes.cpu.complete()) {
+      nes.clock();
+    }
+
+    nes.ppu.get_pattern_table(0, palette, &buf, 0);
+    nes.ppu.get_pattern_table(1, palette, &buf, 128);
 
     t +%= 1;
     // Keep ~60 FPS
