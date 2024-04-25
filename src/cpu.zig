@@ -135,10 +135,7 @@ pub const CPU = struct {
   }
 
   fn ldx(self: *CPU, dst: AddrMode) void {
-    self.x = switch (dst) {
-      .immediate => |v| v,
-      else => unreachable,
-    };
+    self.x = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
       .immediate => 2,
@@ -149,13 +146,14 @@ pub const CPU = struct {
   }
 
   fn ldy(self: *CPU, dst: AddrMode) void {
-    self.y = switch (dst) {
-      .immediate => |v| v,
-      else => unreachable,
-    };
+    self.y = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
       .immediate => 2,
+      .zeroPage => 3,
+      .indexedZeroPageX => 4,
+      .absolute => 4,
+      .indexedAbsoluteX => 4, // TODO: +1 if page crossed
       else => unreachable,
     };
 
@@ -163,11 +161,7 @@ pub const CPU = struct {
   }
 
   fn adc(self: *CPU, dst: AddrMode) void {
-     const m = switch (dst) {
-      .immediate => |v| v,
-      .absolute => |v| self.bus.?.read(v),
-      else => unreachable,
-    };
+     const m = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
       .immediate => 2,
@@ -181,11 +175,7 @@ pub const CPU = struct {
   }
 
   fn cmp(self: *CPU, dst: AddrMode) void {
-    const m = switch (dst) {
-      .immediate => |v| v,
-      .absolute => |v| self.bus.?.read(v),
-      else => unreachable,
-    };
+    const m = self.eval_operand_value(dst);
 
     // std.debug.print("{b:0>8} {b:0>8}\n", .{self.a, m});
     // std.debug.print("{x} {x}\n", .{self.a, m});
@@ -200,11 +190,7 @@ pub const CPU = struct {
   }
 
   fn cpx(self: *CPU, dst: AddrMode) void {
-    const m = switch (dst) {
-      .immediate => |v| v,
-      .absolute => |v| self.bus.?.read(v),
-      else => unreachable,
-    };
+    const m = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
       .immediate => 2,
@@ -216,11 +202,7 @@ pub const CPU = struct {
   }
 
   fn cpy(self: *CPU, dst: AddrMode) void {
-    const m = switch (dst) {
-      .immediate => |v| v,
-      .absolute => |v| self.bus.?.read(v),
-      else => unreachable,
-    };
+    const m = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
       .immediate => 2,
@@ -231,12 +213,26 @@ pub const CPU = struct {
     self.set_cnz_flags(self.y -% m, self.y >= m);
   }
 
-  fn xor(self: *CPU, dst: AddrMode) void {
-    const m = switch (dst) {
-      .immediate => |v| v,
-      .absolute => |v| self.bus.?.read(v),
+  fn cpu_and(self: *CPU, dst: AddrMode) void {
+    const b = self.eval_operand_value(dst);
+
+    self.a &= b;
+
+    self.cycles += switch (dst) {
+      .immediate => 2,
+      .zeroPage => 3,
+      .indexedZeroPageX => 3,
+      .absolute => 4,
+      .indexedAbsoluteX => 4, // TODO: +1 if page crossed
+      .indexedAbsoluteY => 4, // TODO: +1 if page crossed
       else => unreachable,
     };
+
+    self.set_nz_flags(self.a);
+  }
+
+  fn xor(self: *CPU, dst: AddrMode) void {
+    const m = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
       .immediate => 2,
@@ -249,17 +245,24 @@ pub const CPU = struct {
     self.set_nz_flags(self.a);
   }
 
-  fn lda(self: *CPU, dst: AddrMode) void {
-    self.a = switch (dst) {
+  inline fn eval_operand_value(self: *CPU, op: AddrMode) u8 {
+    return switch (op) {
+      .accumulator => self.a,
       .immediate => |v| v,
       .absolute,
+      .indirectIndexed,
       .indexedAbsoluteX,
-      .indexedAbsoluteY => |v| self.bus.?.read(v),
+      .indexedAbsoluteY,
       .zeroPage => |v| self.bus.?.read(v),
       else => unreachable,
     };
+  }
+
+  fn lda(self: *CPU, dst: AddrMode) void {
+    self.a = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
+      .indirectIndexed,
       .immediate => 2,
       .absolute,
       .indexedAbsoluteX,
@@ -272,17 +275,17 @@ pub const CPU = struct {
   }
 
   fn sta(self: *CPU, dst: AddrMode) void {
-    const addr = switch (dst) {
-      .absolute => |v| v,
-      .zeroPage => |v| v,
-      else => unreachable,
-    };
 
-    self.bus.?.write(addr, self.a);
+    self.write_operand_value(dst, self.a);
 
     self.cycles += switch (dst) {
-      .absolute => 4,
-      .zeroPage => 3,
+      .indexedAbsoluteX,
+      .indexedAbsoluteY,
+      .absolute => 3,
+      .indexedIndirect,
+      .indirectIndexed,
+      .zeroPage,
+      .indexedZeroPageX => 2,
       else => unreachable,
     };
 
@@ -290,14 +293,8 @@ pub const CPU = struct {
   }
 
   fn stx(self: *CPU, dst: AddrMode) void {
-    const addr = switch (dst) {
-      .absolute => |v| v,
-      .zeroPage => |v| v,
-      .indexedZeroPageY => |v| v,
-      else => unreachable,
-    };
 
-    self.bus.?.write(addr, self.x);
+    self.write_operand_value(dst, self.x);
 
     self.cycles += switch (dst) {
       .absolute => 4,
@@ -310,14 +307,7 @@ pub const CPU = struct {
   }
 
   fn sty(self: *CPU, dst: AddrMode) void {
-    const addr = switch (dst) {
-      .absolute => |v| v,
-      .zeroPage => |v| v,
-      .indexedZeroPageX => |v| v,
-      else => unreachable,
-    };
-
-    self.bus.?.write(addr, self.y);
+    self.write_operand_value(dst, self.y);
 
     self.cycles += switch (dst) {
       .absolute => 4,
@@ -398,6 +388,42 @@ pub const CPU = struct {
     self.set_nz_flags(self.x);
   }
 
+  fn inc(self: *CPU, dst: AddrMode) void {
+    var m = self.eval_operand_value(dst);
+
+    m +%= 1;
+
+    self.write_operand_value(dst, m);
+
+    self.cycles += switch (dst) {
+      .zeroPage => 5,
+      .indexedZeroPageX,
+      .absolute => 6,
+      .indexedAbsoluteX => 7,
+      else => unreachable
+    };
+
+    self.set_nz_flags(m);
+  }
+
+  fn dec(self: *CPU, dst: AddrMode) void {
+    var m = self.eval_operand_value(dst);
+
+    m -%= 1;
+
+    self.write_operand_value(dst, m);
+
+    self.cycles += switch (dst) {
+      .zeroPage => 5,
+      .indexedZeroPageX,
+      .absolute => 6,
+      .indexedAbsoluteX => 7,
+      else => unreachable
+    };
+
+    self.set_nz_flags(m);
+  }
+
   fn dey(self: *CPU) void {
     self.y -%= 1;
     self.cycles += 2;
@@ -412,25 +438,27 @@ pub const CPU = struct {
     self.set_nz_flags(self.x);
   }
 
-  fn lsr(self: *CPU, dst: AddrMode) void {
-    const m = switch (dst) {
-      .accumulator => self.a,
-      .absolute => |v| self.bus.?.read(v),
+  inline fn write_operand_value(self: *CPU, dst: AddrMode, val: u8) void {
+    switch (dst) {
+      .accumulator => self.a = val,
+      .absolute,
+      .zeroPage,
+      .indirectIndexed,
+      .indexedZeroPageX,
+      .indexedZeroPageY,
+      .indexedAbsoluteX,
+      .indexedAbsoluteY => |v| self.bus.?.write(v, val),
       else => unreachable,
-    };
+    }
+  }
+
+  fn lsr(self: *CPU, dst: AddrMode) void {
+    const m = self.eval_operand_value(dst);
 
     const bit0 = 0b1 & m;
     const res = m / 2;
 
-    switch (dst) {
-      .accumulator => {
-        self.a = res;
-      },
-      .absolute => |v| {
-        self.bus.?.write(v, res);
-      },
-      else => unreachable,
-    }
+    self.write_operand_value(dst, res);
 
     self.cycles += switch (dst) {
       .accumulator => 2,
@@ -544,6 +572,13 @@ pub const CPU = struct {
       // EOR - Exclusive OR
       0x49 => self.xor(self.operand(.immediate)),
       0x4d => self.xor(self.operand(.absolute)),
+      // AND - Logical AND
+      0x29 => self.cpu_and(self.operand(.immediate)),
+      0x25 => self.cpu_and(self.operand(.zeroPage)),
+      0x35 => self.cpu_and(self.operand(.indexedZeroPageX)),
+      0x2d => self.cpu_and(self.operand(.absolute)),
+      0x3d => self.cpu_and(self.operand(.indexedAbsoluteX)),
+      0x39 => self.cpu_and(self.operand(.indexedAbsoluteY)),
       // ADC - Add with Carry
       0x69 => self.adc(self.operand(.immediate)),
       0x6d => self.adc(self.operand(.absolute)),
@@ -576,8 +611,12 @@ pub const CPU = struct {
       // BMI - Branch if Minus
       0x30 => self.bmi(self.operand(.relative)),
       // STA - Store Accumulator
-      0x8d => self.sta(self.operand(.absolute)),
       0x85 => self.sta(self.operand(.zeroPage)),
+      0x95 => self.sta(self.operand(.indexedZeroPageX)),
+      0x8d => self.sta(self.operand(.absolute)),
+      0x9d => self.sta(self.operand(.indexedAbsoluteX)),
+      0x99 => self.sta(self.operand(.indexedAbsoluteY)),
+      0x91 => self.sta(self.operand(.indirectIndexed)),
       // STX - Store X Register
       0x86 => self.stx(self.operand(.zeroPage)),
       0x96 => self.stx(self.operand(.indexedZeroPageY)),
@@ -601,14 +640,29 @@ pub const CPU = struct {
       0xbd => self.lda(self.operand(.indexedAbsoluteX)),
       0xb9 => self.lda(self.operand(.indexedAbsoluteY)),
       0xa5 => self.lda(self.operand(.zeroPage)),
+      0xb1 => self.lda(self.operand(.indirectIndexed)),
       // LDX - Load X Register
       0xa2 => self.ldx(self.operand(.immediate)),
       // LDY - Load Y Register
       0xa0 => self.ldy(self.operand(.immediate)),
+      0xa4 => self.ldy(self.operand(.zeroPage)),
+      0xb4 => self.ldy(self.operand(.indexedZeroPageX)),
+      0xac => self.ldy(self.operand(.absolute)),
+      0xbc => self.ldy(self.operand(.indexedAbsoluteX)),
+      // INC - Increment Memory
+      0xe6 => self.inc(self.operand(.zeroPage)),
+      0xf6 => self.inc(self.operand(.indexedZeroPageX)),
+      0xee => self.inc(self.operand(.absolute)),
+      0xfe => self.inc(self.operand(.indexedAbsoluteX)),
       // INX - Increment X Register
       0xe8 => self.inx(),
       // INY - Increment Y Register
       0xc8 => self.iny(),
+      // DEC - Decrement Memory
+      0xc6 => self.dec(self.operand(.zeroPage)),
+      0xd6 => self.dec(self.operand(.indexedZeroPageX)),
+      0xce => self.dec(self.operand(.absolute)),
+      0xde => self.dec(self.operand(.indexedAbsoluteX)),
       // DEY - Decrement Y Register
       0x88 => self.dey(),
       // DEX - Decrement X Register
@@ -648,10 +702,13 @@ pub const CPU = struct {
         self.cycles += 2;
       },
       else => {
-        const name = debug_op_code(instr);
         std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ name, instr, instr_pos });
         unreachable;
       }
+    }
+
+    if (self.debug) |writer| {
+      writer.print("{X:0>4}  {X:0>2}{s}A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2} PPU:  0,    CYC:{d}\n", .{ instr_pos, instr, " " ** 43, self.a, self.x, self.y, @as(u8, @bitCast(self.p)), self.sp, self.cycles }) catch unreachable;
     }
   }
 
@@ -694,6 +751,15 @@ pub const CPU = struct {
       .indexedAbsoluteY => {
         const v = self.read_u16_operand();
         return .{ .indexedAbsoluteY = self.y + v };
+      },
+      .indirectIndexed => {
+        const v = self.bus.?.read(self.pc);
+        const lsb: u16 = @intCast(self.bus.?.read(v + 0));
+        const msb: u16 = @intCast(self.bus.?.read(v + 1));
+        self.pc += 2;
+        const vv = ((msb << 8) | lsb) + self.y;
+
+        return .{ .indirectIndexed = self.bus.?.read(vv) };
       },
       .immediate => {
         const b: u8 = self.bus.?.read(self.pc);
