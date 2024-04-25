@@ -35,7 +35,7 @@ pub fn main() !void {
   var f = std.mem.zeroInit(c.fenster, .{
     .width = WIDTH,
     .height = HEIGHT,
-    .title = "hello",
+    .title = "zig-nes",
     .buf = &buf[0],
   });
 
