@@ -14,6 +14,9 @@ pub const Bus = struct {
 
   cycles: u32,
 
+  controllers: [2]u8,
+  controllers_cache: [2]u8,
+
 
   pub fn init() Bus {
     return Bus {
@@ -21,7 +24,9 @@ pub const Bus = struct {
       .ram = undefined,
       .cpu = CPU.init(),
       .ppu = PPU.init(),
-      .cycles = 0
+      .cycles = 0,
+      .controllers = undefined,
+      .controllers_cache = undefined
     };
   }
 
@@ -39,8 +44,12 @@ pub const Bus = struct {
       self.ram[k & 0x07ff] = v;
     } else if (k >= 0x2000 and k <= 0x3fff) {
       self.ppu.cpu_write(k & 0x0007, v);
+    } else if (k >= 0x4000 and k <= 0x4015) {
+      // TODO: APU
+    } else if (k >= 0x4016 and k <= 0x4017) {
+      self.controllers_cache[k & 0x0001] = self.controllers[k & 0x0001];
     } else {
-      std.log.debug("Unmapped write bus {x}", .{ k });
+      std.debug.print("Unmapped write bus {x}", .{ k });
       unreachable;
     }
   }
@@ -54,9 +63,17 @@ pub const Bus = struct {
       return self.ram[k & 0x07ff];
     } else if (k >= 0x2000 and k <= 0x3fff) {
       return self.ppu.cpu_read(k & 0x0007);
+    } else if (k >= 0x4000 and k <= 0x4015) {
+      // APU
+      return 0x00;
+    } else if (k >= 0x4016 and k <= 0x4017) {
+      const r = (self.controllers_cache[k & 0x0001] & 0x80) > 0;
+      self.controllers_cache[k & 0x0001] <<= 1;
+      return if (r) 1 else 0;
     }
 
-    std.log.debug("Unmapped read bus {x}", .{ k });
+    std.debug.print("Unmapped read bus {x}", .{ k });
+
     unreachable;
   }
 
