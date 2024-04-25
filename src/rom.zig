@@ -59,6 +59,15 @@ pub const Rom = struct {
   prg_slice: []u8,
   chr_slice: []u8,
 
+  pub fn load_unchecked(rom_buffer: []u8) !Rom {
+    return Rom {
+      .buffer = rom_buffer[0..],
+      .header = Header {},
+      .prg_slice = rom_buffer[0..],
+      .chr_slice = &[_]u8{}
+    };
+  }
+
   pub fn load(rom_buffer: []u8) !Rom {
     const header = try Header.parse(rom_buffer[0..16]);
     const start_offset_prg: usize = if (header.flags6.has_trainer) (16 + 512) else 16;
