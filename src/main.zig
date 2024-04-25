@@ -11,9 +11,15 @@ const WIDTH: comptime_int = 256;
 const HEIGHT: comptime_int = 240;
 
 pub fn main() !void {
+  const allocator = std.heap.page_allocator;
   var max_rom_buffer: [rom.MAX_SIZE]u8 = undefined;
 
-  const rom_buffer = try std.fs.cwd().readFile("src/roms/nestest.nes", &max_rom_buffer);
+  const args = try std.process.argsAlloc(allocator);
+  defer std.process.argsFree(allocator, args);
+
+  const romName: []const u8 = if (args.len > 1) args[1] else "src/roms/nestest.nes";
+
+  const rom_buffer = try std.fs.cwd().readFile(romName, &max_rom_buffer);
 
   const loaded_rom = try rom.Rom.load(rom_buffer);
 
