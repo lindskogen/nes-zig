@@ -20,3 +20,6 @@ zig-out/
 src/roms/
 *.bin
 *.nes
+
+out
+*.swp
