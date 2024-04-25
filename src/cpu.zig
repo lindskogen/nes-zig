@@ -1,6 +1,7 @@
 const debug_op_code = @import("debug.zig").debug_op_code;
 const AddrMode = @import("addr.zig").AddrMode;
 const Bus = @import("bus.zig").Bus;
+const rom = @import("rom.zig");
 const std = @import("std");
 
 inline fn is_negative(v: u8) bool {
@@ -28,13 +29,19 @@ pub const CPU = struct {
   x: u8,
   y: u8,
 
+  debug: ?std.fs.File.Writer,
+
   /// N, V, _, B, D, I, Z, C
   p: Flags,
 
   cycles: u32,
 
   pub fn init() CPU {
-    return .{ .bus = null, .p = Flags {}, .a = 0, .x = 0, .y = 0, .sp = 0xfd, .pc = 0, .cycles = 0 };
+    return .{ .bus = null, .p = Flags {}, .debug = null, .a = 0, .x = 0, .y = 0, .sp = 0xfd, .pc = 0, .cycles = 0 };
+  }
+
+  pub fn complete(self: *CPU) bool {
+    return self.cycles == 0;
   }
 
   inline fn read_u16(self: *CPU, addr: u16) u16 {
@@ -62,7 +69,7 @@ pub const CPU = struct {
       self.p._padding = 1;
       self.p.interrupt_disable = true;
 
-      self.push(self.p);
+      self.push(@bitCast(self.p));
       self.pc = self.read_u16(0xfffe);
       self.cycles = 7;
     }
@@ -74,15 +81,16 @@ pub const CPU = struct {
     self.p._padding = 1;
     self.p.interrupt_disable = true;
 
-    self.push(self.p);
+    self.push(@bitCast(self.p));
     self.pc = self.read_u16(0xfffa);
     self.cycles = 8;
   }
 
   pub fn rti(self: *CPU) void {
-    self.p = self.pop();
+    self.p = @bitCast(self.pop());
     // TODO: restore flags B & U?
     self.pc = self.pop16();
+    self.cycles += 6;
   }
 
   pub fn clock(self: *CPU) void {
@@ -559,9 +567,14 @@ pub const CPU = struct {
   fn step(self: *CPU) void {
     const instr_pos = self.pc;
     const instr = self.bus.?.read(instr_pos);
+    const name = debug_op_code(instr);
     self.pc += 1;
 
     switch (instr) {
+      // BRK - Force Interrupt
+      // 0x00 => self.brk(),
+      // RTI - Return from Interrupt
+      0x40 => self.rti(),
       // JMP - Jump
       0x4c => self.jmp(self.operand(.absolute)),
       // 0x6c => self.jmp(self.operand(bus, .indirect)),
@@ -779,20 +792,55 @@ pub const CPU = struct {
   }
 };
 
-
-
 test "6502_functional_test" {
-  var cpu = CPU.init();
-  var bus: Bus = undefined;
+  const file = @embedFile("6502_functional_test.bin");
+  var buffer: [file.len]u8 = undefined;
 
-  const text = @embedFile("6502_functional_test.bin");
+  std.mem.copyForwards(u8, &buffer, file);
 
-  std.bus.copyForwards(u8, &bus, text);
+  const loaded_rom = try rom.Rom.load_unchecked(&buffer);
+  var nes: Bus = Bus.init();
+  nes.cpu.bus = &nes;
 
-  cpu.pc = 0x0400;
 
-  cpu.run(&bus);
-  std.debug.print("\npc = {x}\n", .{ cpu.pc });
+  nes.load_rom(&loaded_rom);
 
-  try std.testing.expectEqual(cpu.pc, 0x3399);
+  nes.reset();
+
+
+  nes.cpu.pc = 0x0400;
+
+  try std.testing.expectEqual(nes.cpu.pc, 0x3399);
+}
+
+
+test "nestest" {
+  std.debug.print("\n", .{ });
+  const file = @embedFile("roms/nestest.nes");
+  var buffer: [file.len]u8 = undefined;
+
+  const stdErr = std.io.getStdOut().writer();
+
+
+
+  std.mem.copyForwards(u8, &buffer, file);
+
+  const loaded_rom = try rom.Rom.load(&buffer);
+  var nes: Bus = Bus.init();
+  nes.cpu.debug = stdErr;
+  nes.cpu.bus = &nes;
+
+
+  nes.load_rom(&loaded_rom);
+
+  nes.reset();
+
+  nes.cpu.pc = 0x8000;
+
+  while (nes.cpu.pc != 0xC66E) {
+    nes.clock();
+  }
+
+  try std.testing.expectEqual(0x0000, nes.read(0x0002));
+  try std.testing.expectEqual(0x0000, nes.read(0x0003));
 }
