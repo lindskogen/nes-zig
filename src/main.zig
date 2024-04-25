@@ -30,6 +30,8 @@ pub fn main() !void {
 
   nes.reset();
 
+  nes.cpu.debug = std.io.getStdOut().writer();
+
   var buf: [WIDTH * HEIGHT]u32 = undefined;
 
   var f = std.mem.zeroInit(c.fenster, .{

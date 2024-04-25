@@ -599,22 +599,12 @@ pub const CPU = struct {
   fn step(self: *CPU) void {
     const instr_pos = self.pc;
     const instr = self.bus.?.read(instr_pos);
-    const name = cpu_debug.debug_op_code(instr);
+    const info = cpu_debug.debug_op_code(instr);
+    const nameWithDetails = info[1];
     self.pc += 1;
 
     if (self.debug) |writer| {
-      writer.print("{X:0>4}  {X:0>2}{s:<8}{s:<32}A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2} PPU:  0,    CYC:{d}\n", .{
-        instr_pos,
-        instr,
-        "",
-        name,
-        self.a,
-        self.x,
-        self.y,
-        @as(u8, @bitCast(self.p)),
-        self.sp,
-        self.cycles
-      }) catch unreachable;
+     cpu_debug.debug_print(self, writer, instr_pos, instr) catch unreachable;
     }
 
     switch (instr) {
@@ -777,7 +767,7 @@ pub const CPU = struct {
         self.cycles += 2;
       },
       else => {
-        std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ name, instr, instr_pos });
+        std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ nameWithDetails, instr, instr_pos });
         unreachable;
       }
     }
@@ -851,6 +841,7 @@ pub const CPU = struct {
 };
 
 test "6502_functional_test" {
+  std.debug.print("\n", .{ });
   const file = @embedFile("6502_functional_test.bin");
   var buffer: [file.len]u8 = undefined;
 
@@ -859,7 +850,7 @@ test "6502_functional_test" {
   const loaded_rom = try rom.Rom.load_unchecked(&buffer);
   var nes: Bus = Bus.init();
   nes.cpu.bus = &nes;
-
+  nes.cpu.debug = std.io.getStdOut().writer();
 
   nes.load_rom(&loaded_rom);
 
@@ -867,7 +858,9 @@ test "6502_functional_test" {
 
   nes.cpu.pc = 0x0400;
 
-  while (nes.cpu.pc != 0x3399) {
+  var pc: u16 = 0;
+  while (nes.cpu.pc != pc) {
+    pc = nes.cpu.pc;
     nes.clock();
   }
 
@@ -880,15 +873,11 @@ test "nestest" {
   const file = @embedFile("roms/nestest.nes");
   var buffer: [file.len]u8 = undefined;
 
-  const stdErr = std.io.getStdOut().writer();
-
-
-
   std.mem.copyForwards(u8, &buffer, file);
 
   const loaded_rom = try rom.Rom.load(&buffer);
   var nes: Bus = Bus.init();
-  nes.cpu.debug = stdErr;
+  nes.cpu.debug = std.io.getStdOut().writer();
   nes.cpu.bus = &nes;
 
 

@@ -55,6 +55,7 @@ const Header = struct {
 pub const Rom = struct {
   header: Header,
   buffer: []u8,
+  unchecked: bool,
 
   prg_slice: []u8,
   chr_slice: []u8,
@@ -63,6 +64,7 @@ pub const Rom = struct {
     return Rom {
       .buffer = rom_buffer[0..],
       .header = Header {},
+      .unchecked = true,
       .prg_slice = rom_buffer[0..],
       .chr_slice = &[_]u8{}
     };
@@ -78,12 +80,16 @@ pub const Rom = struct {
     return Rom {
       .buffer = rom_buffer,
       .header = header,
+      .unchecked = false,
       .prg_slice = rom_buffer[start_offset_prg..(start_offset_prg + prg_rom_len)],
       .chr_slice = rom_buffer[chr_rom_start..(chr_rom_start + chr_rom_len)],
     };
   }
 
   pub fn read_prg(self: *const Rom, k: u16) ?u8 {
+    if (self.unchecked) {
+      return self.prg_slice[k];
+    }
 
     if (k >= 0x8000 and k <= 0xffff) {
       const mask: u16 = if (self.header.prg_rom_size > 1) 0x7fff else 0x3fff;
@@ -95,6 +101,10 @@ pub const Rom = struct {
   }
 
   pub fn write_prg(self: *const Rom, k: u16, v: u8) bool {
+    if (self.unchecked) {
+      self.prg_slice[k] = v;
+      return true;
+    }
     if (k >= 0x8000 and k <= 0xffff) {
       const mask: u16 = if (self.header.prg_rom_size > 1) 0x7fff else 0x3fff;
       const addr: u16 = k & mask;
