@@ -1,6 +1,17 @@
 const std = @import("std");
 const Rom = @import("rom.zig").Rom;
 
+const PPUStatus = packed struct(u8) {
+  /// Returns stale PPU bus contents.
+  _open_bus: u5,
+  /// Sprite overflow.
+  sprite_overflow: bool,
+  /// Sprite 0 Hit.
+  sprite_0_hit: bool,
+  /// Vertical blank has started
+  vertical_blank: bool
+};
+
 
 const PPUCtrl = packed struct(u8) {
   /// Base nametable address
@@ -39,6 +50,7 @@ pub const PPU = struct {
   internal: [0x4000]u8,
   ctrl: PPUCtrl,
   mask: u8, // TODO map this
+  status: PPUStatus,
   rom: ?*const Rom,
 
   addr: u16,
@@ -64,6 +76,7 @@ pub const PPU = struct {
       .addr = 0,
       .scroll = 0,
       .mask = 0,
+      .status = @bitCast(@as(u8, 0)),
       .nameTable = undefined,
       .patternTable = undefined,
       .paletteTable = undefined,
@@ -93,6 +106,13 @@ pub const PPU = struct {
     return switch (k) {
       0x0000 => @bitCast(self.ctrl),
       0x0001 => @bitCast(self.mask),
+      0x0002 => {
+        self.status.vertical_blank = true;
+        const s: u8 = @bitCast(self.status);
+        self.status.vertical_blank = false;
+        self.w = .msb;
+        return s;
+      },
       0x0005 => unreachable,
       0x0006 => unreachable,
       0x0007 => a: {
@@ -106,8 +126,9 @@ pub const PPU = struct {
         self.addr += self.ctrl.get_vram_increment();
         break :a d;
       },
-      else => a: {
-        break :a 0xaa;
+      else =>  {
+        std.debug.print("unmapped read {x}\n", .{ k });
+        unreachable;
       }
     };
   }
@@ -147,6 +168,7 @@ pub const PPU = struct {
         unreachable;
       },
       else => {
+        unreachable;
       }
     }
   }
@@ -242,7 +264,7 @@ pub const PPU = struct {
     return nesPalette[idx];
   }
 
-  pub fn get_pattern_table(self: *PPU, i: u8, palette: u8, buf: []u32) void {
+  pub fn get_pattern_table(self: *PPU, i: u8, palette: u8, buf: []u32, sc_offset: usize) void {
     const ii = @as(u16, @intCast(i));
     for (0..16) |ty| {
       for (0..16) |tx| {
@@ -260,11 +282,12 @@ pub const PPU = struct {
             const x = tx * 8 + (7 - col);
             const y = ty * 8 + row;
 
-            buf[y * 256 + x] = self.get_color_from_palette_ram(palette, pixel);
+            buf[y * 256 + x + sc_offset] = self.get_color_from_palette_ram(palette, pixel);
           }
         }
       }
     }
+
   }
 };
 
