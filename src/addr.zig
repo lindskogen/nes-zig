@@ -35,8 +35,8 @@ pub const AddrMode = union(enum) {
   relative: i8,
 
   /// Indexed indirect (also known as pre-indexed) addressing takes a single byte as an operand and adds the value of the X register to it (with wraparound) to give the address of the least significant byte of the target address.
-  indexedIndirect: u8,
+  indexedIndirect: u16,
 
   /// Indirect indexed (also known as post-indexed) addressing takes a single operand which gives the zero page address of the least significant byte of a 16-bit address which is then added to the Y register to give the target address.
-  indirectIndexed: u8,
+  indirectIndexed: u16,
 };

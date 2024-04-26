@@ -8,6 +8,22 @@ inline fn is_negative(v: u8) bool {
   return @clz(v) == 0;
 }
 
+pub const Op = union(std.meta.FieldEnum(AddrMode)) {
+  zeroPage: *const (fn (self: *CPU, dst: AddrMode) void),
+  indexedZeroPageX: *const (fn (self: *CPU, dst: AddrMode) void),
+  indexedZeroPageY: *const (fn (self: *CPU, dst: AddrMode) void),
+  absolute: *const (fn (self: *CPU, dst: AddrMode) void),
+  indexedAbsoluteX: *const (fn (self: *CPU, dst: AddrMode) void),
+  indexedAbsoluteY: *const (fn (self: *CPU, dst: AddrMode) void),
+  indirect: *const (fn (self: *CPU, dst: AddrMode) void),
+  implied: *const (fn (self: *CPU) void),
+  accumulator: *const (fn (self: *CPU, dst: AddrMode) void),
+  immediate: *const (fn (self: *CPU, dst: AddrMode) void),
+  relative: *const (fn (self: *CPU, dst: AddrMode) void),
+  indexedIndirect: *const (fn (self: *CPU, dst: AddrMode) void),
+  indirectIndexed: *const (fn (self: *CPU, dst: AddrMode) void),
+  };
+
 const Flags = packed struct(u8) {
   carry: bool = false,
   zero: bool = false,
@@ -17,6 +33,10 @@ const Flags = packed struct(u8) {
   _padding: u1 = 1,
   overflow: bool = false,
   negative: bool = false,
+};
+
+const CPUError = error {
+  unmappedCode
 };
 
 pub const CPU = struct {
@@ -271,13 +291,18 @@ pub const CPU = struct {
   inline fn eval_operand_value(self: *CPU, op: AddrMode) u8 {
     return switch (op) {
       .accumulator => self.a,
-      .immediate => |v| v,
       .absolute,
-      .indirectIndexed,
-      .indexedAbsoluteX,
-      .indexedAbsoluteY,
-      .zeroPage => |v| self.bus.?.read(v),
-      else => unreachable,
+      .zeroPage => |k| self.read_bus(k),
+      .immediate => |k| k,
+      .indirectIndexed => |k| self.read_bus(self.y + k),
+      .indexedZeroPageX => |k| self.read_bus(self.x + k),
+      .indexedZeroPageY => |k| self.read_bus(self.y + k),
+      .indexedAbsoluteX => |k| self.read_bus(self.x + k),
+      .indexedAbsoluteY => |k| self.read_bus(self.y + k),
+      else => {
+        std.debug.print("{}", .{ op });
+        unreachable;
+      }
     };
   }
 
@@ -461,16 +486,24 @@ pub const CPU = struct {
     self.set_nz_flags(self.x);
   }
 
+  inline fn read_bus(self: *CPU, k: u16) u8 {
+    return self.bus.?.read(k);
+  }
+
+  inline fn write_bus(self: *CPU, k: u16, v: u8) void {
+    self.bus.?.write(k, v);
+  }
+
   inline fn write_operand_value(self: *CPU, dst: AddrMode, val: u8) void {
     switch (dst) {
       .accumulator => self.a = val,
       .absolute,
-      .zeroPage,
-      .indirectIndexed,
-      .indexedZeroPageX,
-      .indexedZeroPageY,
-      .indexedAbsoluteX,
-      .indexedAbsoluteY => |v| self.bus.?.write(v, val),
+      .zeroPage => |k| self.write_bus(k, val),
+      .indirectIndexed => |k| self.write_bus(self.y + k, val),
+      .indexedZeroPageX => |k| self.write_bus(self.x + k, val),
+      .indexedZeroPageY => |k| self.write_bus(self.y + k, val),
+      .indexedAbsoluteX => |k| self.write_bus(self.x + k, val),
+      .indexedAbsoluteY => |k| self.write_bus(self.y + k, val),
       else => unreachable,
     }
   }
@@ -596,180 +629,218 @@ pub const CPU = struct {
     self.set_nz_flags(self.a);
   }
 
-  fn step(self: *CPU) void {
-    const instr_pos = self.pc;
-    const instr = self.bus.?.read(instr_pos);
-    const info = cpu_debug.debug_op_code(instr);
-    const nameWithDetails = info[1];
-    self.pc += 1;
+  fn nop(self: *CPU) void {
+    self.cycles += 2;
+  }
 
-    if (self.debug) |writer| {
-     cpu_debug.debug_print(self, writer, instr_pos, instr) catch unreachable;
-    }
+  fn clc(self: *CPU) void {
+    self.p.carry = false;
+    self.cycles += 2;
+  }
 
-    switch (instr) {
+  fn sec(self: *CPU) void {
+    self.p.carry = true;
+    self.cycles += 2;
+  }
+
+  fn sei(self: *CPU) void {
+    self.p.interrupt_disable = true;
+    self.cycles += 2;
+  }
+
+  fn cld(self: *CPU) void {
+    self.p.decimal_mode = false;
+    self.cycles += 2;
+  }
+
+  fn mapOp(code: u8) !Op {
+    return switch (code) {
       // BRK - Force Interrupt
       // 0x00 => self.brk(),
       // RTI - Return from Interrupt
-      0x40 => self.rti(),
+      0x40 => .{ .implied = &rti },
       // JMP - Jump
-      0x4c => self.jmp(self.operand(.absolute)),
+      0x4c => .{ .absolute = &jmp },
       // 0x6c => self.jmp(self.operand(bus, .indirect)),
       // JSR - Jump to Subroutine
-      0x20 => self.jsr(self.operand(.absolute)),
+      0x20 => .{ .absolute = &jsr  },  // },
       // RTS - Return from Subroutine
-      0x60 => self.rts(),
+      0x60 => .{ .implied = &rts },
       // EOR - Exclusive OR
-      0x49 => self.xor(self.operand(.immediate)),
-      0x4d => self.xor(self.operand(.absolute)),
+      0x49 => .{ .immediate = &xor },
+      0x4d => .{ .absolute = &xor },
       // AND - Logical AND
-      0x29 => self.cpu_and(self.operand(.immediate)),
-      0x25 => self.cpu_and(self.operand(.zeroPage)),
-      0x35 => self.cpu_and(self.operand(.indexedZeroPageX)),
-      0x2d => self.cpu_and(self.operand(.absolute)),
-      0x3d => self.cpu_and(self.operand(.indexedAbsoluteX)),
-      0x39 => self.cpu_and(self.operand(.indexedAbsoluteY)),
+      0x29 => .{ .immediate = &cpu_and },
+      0x25 => .{ .zeroPage = &cpu_and },
+      0x35 => .{ .indexedZeroPageX = &cpu_and },
+      0x2d => .{ .absolute = &cpu_and },
+      0x3d => .{ .indexedAbsoluteX = &cpu_and },
+      0x39 => .{ .indexedAbsoluteY = &cpu_and },
       // ADC - Add with Carry
-      0x69 => self.adc(self.operand(.immediate)),
-      0x6d => self.adc(self.operand(.absolute)),
+      0x69 => .{ .immediate = &adc },
+      0x6d => .{ .absolute = &adc },
       // TAY - Transfer Accumulator to Y
-      0xa8 => self.tay(),
+      0xa8 => .{ .implied = &tay },
       // TYA - Transfer Y to Accumulator
-      0x98 => self.tya(),
+      0x98 => .{ .implied = &tya },
       // TXS - Transfer X to Stack Pointer
-      0x9a => self.txs(),
+      0x9a => .{ .implied = &txs },
       // TSX - Transfer Stack Pointer to X
-      0xba => self.tsx(),
+      0xba => .{ .implied = &tsx },
       // TAX - Transfer Accumulator to X
-      0xaa => self.tax(),
+      0xaa => .{ .implied = &tax },
       // TXA - Transfer X to Accumulator
-      0x8a => self.txa(),
+      0x8a => .{ .implied = &txa },
       // BPL - Branch if Positive
-      0x10 => self.bpl(self.operand(.relative)),
+      0x10 => .{ .relative = &bpl },
       // BNE - Branch if Not Equal
-      0xd0 => self.bne(self.operand(.relative)),
+      0xd0 => .{ .relative = &bne },
       // BEQ - Branch if Equal
-      0xf0 => self.beq(self.operand(.relative)),
+      0xf0 => .{ .relative = &beq },
       // BCC - Branch if Carry Clear
-      0x90 => self.bcc(self.operand(.relative)),
+      0x90 => .{ .relative = &bcc },
       // BCS - Branch if Carry Set
-      0xb0 => self.bcs(self.operand(.relative)),
+      0xb0 => .{ .relative = &bcs },
       // BVC - Branch if Overflow Clear
-      0x50 => self.bvc(self.operand(.relative)),
+      0x50 => .{ .relative = &bvc },
       // BVS - Branch if Overflow Set
-      0x70 => self.bvs(self.operand(.relative)),
+      0x70 => .{ .relative = &bvs },
       // BMI - Branch if Minus
-      0x30 => self.bmi(self.operand(.relative)),
+      0x30 => .{ .relative = &bmi },
       // STA - Store Accumulator
-      0x85 => self.sta(self.operand(.zeroPage)),
-      0x95 => self.sta(self.operand(.indexedZeroPageX)),
-      0x8d => self.sta(self.operand(.absolute)),
-      0x9d => self.sta(self.operand(.indexedAbsoluteX)),
-      0x99 => self.sta(self.operand(.indexedAbsoluteY)),
-      0x91 => self.sta(self.operand(.indirectIndexed)),
+      0x85 => .{ .zeroPage = &sta },
+      0x95 => .{ .indexedZeroPageX = &sta },
+      0x8d => .{ .absolute = &sta },
+      0x9d => .{ .indexedAbsoluteX = &sta },
+      0x99 => .{ .indexedAbsoluteY = &sta },
+      0x91 => .{ .indirectIndexed = &sta },
       // STX - Store X Register
-      0x86 => self.stx(self.operand(.zeroPage)),
-      0x96 => self.stx(self.operand(.indexedZeroPageY)),
-      0x8e => self.stx(self.operand(.absolute)),
+      0x86 => .{ .zeroPage = &stx },
+      0x96 => .{ .indexedZeroPageY = &stx },
+      0x8e => .{ .absolute = &stx },
       // STY - Store Y Register
-      0x84 => self.sty(self.operand(.zeroPage)),
-      0x94 => self.sty(self.operand(.indexedZeroPageX)),
-      0x8c => self.sty(self.operand(.absolute)),
+      0x84 => .{ .zeroPage = &sty },
+      0x94 => .{ .indexedZeroPageX = &sty },
+      0x8c => .{ .absolute = &sty },
       // CMP - Compare
-      0xc9 => self.cmp(self.operand(.immediate)),
-      0xcd => self.cmp(self.operand(.absolute)),
+      0xc9 => .{ .immediate = &cmp },
+      0xcd => .{ .absolute = &cmp },
       // CPX - Compare X Register
-      0xe0 => self.cpx(self.operand(.immediate)),
-      0xec => self.cpx(self.operand(.absolute)),
+      0xe0 => .{ .immediate = &cpx },
+      0xec => .{ .absolute = &cpx },
       // CPY - Compare Y Register
-      0xc0 => self.cpy(self.operand(.immediate)),
-      0xcc => self.cpy(self.operand(.absolute)),
+      0xc0 => .{ .immediate = &cpy },
+      0xcc => .{ .absolute = &cpy },
       // LDA - Load Accumulator
-      0xa9 => self.lda(self.operand(.immediate)),
-      0xad => self.lda(self.operand(.absolute)),
-      0xbd => self.lda(self.operand(.indexedAbsoluteX)),
-      0xb9 => self.lda(self.operand(.indexedAbsoluteY)),
-      0xa5 => self.lda(self.operand(.zeroPage)),
-      0xb1 => self.lda(self.operand(.indirectIndexed)),
+      0xa9 => .{ .immediate = &lda },
+      0xad => .{ .absolute = &lda },
+      0xbd => .{ .indexedAbsoluteX = &lda },
+      0xb9 => .{ .indexedAbsoluteY = &lda },
+      0xa5 => .{ .zeroPage = &lda },
+      0xb1 => .{ .indirectIndexed = &lda },
       // LDX - Load X Register
-      0xa2 => self.ldx(self.operand(.immediate)),
+      0xa2 => .{ .immediate = &ldx },
       // LDY - Load Y Register
-      0xa0 => self.ldy(self.operand(.immediate)),
-      0xa4 => self.ldy(self.operand(.zeroPage)),
-      0xb4 => self.ldy(self.operand(.indexedZeroPageX)),
-      0xac => self.ldy(self.operand(.absolute)),
-      0xbc => self.ldy(self.operand(.indexedAbsoluteX)),
+      0xa0 => .{ .immediate = &ldy },
+      0xa4 => .{ .zeroPage = &ldy },
+      0xb4 => .{ .indexedZeroPageX = &ldy },
+      0xac => .{ .absolute = &ldy },
+      0xbc => .{ .indexedAbsoluteX = &ldy },
       // INC - Increment Memory
-      0xe6 => self.inc(self.operand(.zeroPage)),
-      0xf6 => self.inc(self.operand(.indexedZeroPageX)),
-      0xee => self.inc(self.operand(.absolute)),
-      0xfe => self.inc(self.operand(.indexedAbsoluteX)),
+      0xe6 => .{ .zeroPage = &inc },
+      0xf6 => .{ .indexedZeroPageX = &inc },
+      0xee => .{ .absolute = &inc },
+      0xfe => .{ .indexedAbsoluteX = &inc },
       // INX - Increment X Register
-      0xe8 => self.inx(),
+      0xe8 => .{ .implied = &inx },
       // INY - Increment Y Register
-      0xc8 => self.iny(),
+      0xc8 => .{ .implied = &iny },
       // DEC - Decrement Memory
-      0xc6 => self.dec(self.operand(.zeroPage)),
-      0xd6 => self.dec(self.operand(.indexedZeroPageX)),
-      0xce => self.dec(self.operand(.absolute)),
-      0xde => self.dec(self.operand(.indexedAbsoluteX)),
+      0xc6 => .{ .zeroPage = &dec },
+      0xd6 => .{ .indexedZeroPageX = &dec },
+      0xce => .{ .absolute = &dec },
+      0xde => .{ .indexedAbsoluteX = &dec },
       // DEY - Decrement Y Register
-      0x88 => self.dey(),
+      0x88 => .{ .implied = &dey },
       // DEX - Decrement X Register
-      0xca => self.dex(),
+      0xca => .{ .implied = &dex },
       // PHA - Push Accumulator
-      0x48 => self.pha(),
+      0x48 => .{ .implied = &pha },
       // PHP - Push Processor Status
-      0x08 => self.php(),
+      0x08 => .{ .implied = &php },
       // PLA - Pull Accumulator
-      0x68 => self.pla(),
+      0x68 => .{ .implied = &pla },
       // PLP - Pull Processor Status
-      0x28 => self.plp(),
+      0x28 => .{ .implied = &plp },
       // BIT - Bit Test
-      0x24 => self.bit(self.operand(.zeroPage)),
-      0x2c => self.bit(self.operand(.absolute)),
+      0x24 => .{ .zeroPage = &bit },
+      0x2c => .{ .absolute = &bit },
       // LSR - Logical Shift Right
-      0x4a => self.lsr(self.operand(.accumulator)),
-      0x4e => self.lsr(self.operand(.absolute)),
+      0x4a => .{ .accumulator = &lsr },
+      0x4e => .{ .absolute = &lsr },
+      // NOP - No Operation
       0xc2,
       0x1a,
       0x3a,
       0x5a,
       0x7a,
-      0xea => {
-        // NOP - No Operation
-        self.cycles += 2;
-      },
-      0x80 => {
-        // NOP - Unofficial 2-byte No Operation
-        std.debug.print("Unofficial 2-byte NOP?", .{ });
-        self.pc += 1;
-        self.cycles += 2;
-      },
-      0x18 => {
-        // CLC - Clear Carry Flag
-        self.p.carry = false;
-        self.cycles += 2;
-      },
-      0x38 => {
-        // SEC - Set Carry Flag
-        self.p.carry = true;
-        self.cycles += 2;
-      },
-      0x78 => {
-        // SEI - Set Interrupt Disable
-        self.p.interrupt_disable = true;
-        self.cycles += 2;
-      },
-      0xd8 => {
-        // CLD - Clear Decimal Mode
-        self.p.decimal_mode = false;
-        self.cycles += 2;
-      },
-      else => {
-        std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ nameWithDetails, instr, instr_pos });
-        unreachable;
-      }
+      0xea => .{ .implied = &nop },
+      // CLC - Clear Carry Flag
+      0x18 => .{ .implied = &clc },
+      // SEC - Set Carry Flag
+      0x38 => .{ .implied = &sec },
+      // SEI - Set Interrupt Disable
+      0x78 => .{ .implied = &sei },
+      // CLD - Clear Decimal Mode
+      0xd8 => .{ .implied = &cld },
+      else => CPUError.unmappedCode
+    };
+  }
+
+  fn step(self: *CPU) void {
+    const instr_pos = self.pc;
+    const instr = self.bus.?.read(instr_pos);
+    self.pc += 1;
+
+    const op: Op = mapOp(instr) catch {
+      const name = cpu_debug.debug_op_code(instr);
+      const nameWithDetails = name[1];
+      std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ nameWithDetails, instr, instr_pos });
+      unreachable;
+    };
+
+    const curr_operand: AddrMode = switch (op) {
+      .implied => .{ .implied = {} },
+      .accumulator => .{ .accumulator = {} },
+      .zeroPage => operand(self, .zeroPage),
+      .indexedZeroPageX => operand(self, .indexedZeroPageX),
+      .indexedZeroPageY => operand(self, .indexedZeroPageY),
+      .absolute => operand(self, .absolute),
+      .indexedAbsoluteX => operand(self, .indexedAbsoluteX),
+      .indexedAbsoluteY => operand(self, .indexedAbsoluteY),
+      .indirectIndexed => operand(self, .indirectIndexed),
+      .immediate => operand(self, .immediate),
+      .relative => operand(self, .relative),
+      else => unreachable,
+    };
+
+    if (self.debug) |writer| {
+      cpu_debug.debug_print(self, writer, curr_operand, instr_pos, instr) catch unreachable;
+    }
+
+    switch (op) {
+      .implied => |func| func(self),
+      .accumulator => |func| func(self, curr_operand),
+      .zeroPage => |func| func(self, curr_operand),
+      .indexedZeroPageX => |func| func(self, curr_operand),
+      .indexedZeroPageY => |func| func(self, curr_operand),
+      .absolute => |func| func(self, curr_operand),
+      .indexedAbsoluteX => |func| func(self, curr_operand),
+      .indexedAbsoluteY => |func| func(self, curr_operand),
+      .indirectIndexed => |func| func(self, curr_operand),
+      .immediate => |func| func(self, curr_operand),
+      .relative => |func| func(self, curr_operand),
+      else => unreachable,
     }
   }
 
@@ -794,12 +865,12 @@ pub const CPU = struct {
       .indexedZeroPageX => {
         const v: u8 = self.bus.?.read(self.pc);
         self.pc += 1;
-        return .{ .indexedZeroPageX = self.x + v };
+        return .{ .indexedZeroPageX = v };
       },
       .indexedZeroPageY => {
         const v: u8 = self.bus.?.read(self.pc);
         self.pc += 1;
-        return .{ .indexedZeroPageY = self.y + v };
+        return .{ .indexedZeroPageY = v };
       },
       .absolute => {
         const v = self.read_u16_operand();
@@ -807,20 +878,20 @@ pub const CPU = struct {
       },
       .indexedAbsoluteX => {
         const v = self.read_u16_operand();
-        return .{ .indexedAbsoluteX = self.x + v };
+        return .{ .indexedAbsoluteX = v };
       },
       .indexedAbsoluteY => {
         const v = self.read_u16_operand();
-        return .{ .indexedAbsoluteY = self.y + v };
+        return .{ .indexedAbsoluteY = v };
       },
       .indirectIndexed => {
         const v = self.bus.?.read(self.pc);
         const lsb: u16 = @intCast(self.bus.?.read(v + 0));
         const msb: u16 = @intCast(self.bus.?.read(v + 1));
         self.pc += 2;
-        const vv = ((msb << 8) | lsb) + self.y;
+        const vv = ((msb << 8) | lsb);
 
-        return .{ .indirectIndexed = self.bus.?.read(vv) };
+        return .{ .indirectIndexed = vv };
       },
       .immediate => {
         const b: u8 = self.bus.?.read(self.pc);

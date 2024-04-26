@@ -1,6 +1,10 @@
 const std = @import("std");
 
-const CPU = @import("cpu.zig").CPU;
+const cpuMod = @import("cpu.zig");
+const AddrMode = @import("addr.zig").AddrMode;
+
+const CPU = cpuMod.CPU;
+const Op = cpuMod.Op;
 
 pub fn debug_op_code(code: u8) struct { []const u8, []const u8, u8} {
   return switch (code) {
@@ -28,7 +32,7 @@ pub fn debug_op_code(code: u8) struct { []const u8, []const u8, u8} {
     0x15 => .{ "ORA", "ORA z,X", 4 },
     0x16 => .{ "ASL", "ASL z,X", 6 },
     0x17 => .{ "SLO", "SLO z,X", 6 },
-    0x18 => .{ "CLC", "CLC", 2 },
+    0x18 => .{ "CLC", "CLC", 1 },
     0x19 => .{ "ORA", "ORA a,Y", 4 },
     0x1A => .{ "NOP", "NOP", 2 },
     0x1B => .{ "SLO", "SLO abs,Y", 7 },
@@ -60,7 +64,7 @@ pub fn debug_op_code(code: u8) struct { []const u8, []const u8, u8} {
     0x35 => .{ "AND", "AND z,X", 4 },
     0x36 => .{ "ROL", "ROL z,X", 6 },
     0x37 => .{ "RLA", "RLA z,X", 6 },
-    0x38 => .{ "SEC", "SEC", 2 },
+    0x38 => .{ "SEC", "SEC", 1 },
     0x39 => .{ "AND", "AND a,Y", 4 },
     0x3A => .{ "NOP", "NOP", 2 },
     0x3B => .{ "RLA", "RLA abs,Y", 7 },
@@ -264,32 +268,54 @@ pub fn debug_op_code(code: u8) struct { []const u8, []const u8, u8} {
 }
 
 
-pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, instr_pos: u16, instr: u8) !void {
+inline fn add_i8(a: u16, b: i8) u16 {
+  return if (b >= 0) a + @abs(b) else a - @abs(b);
+}
+
+pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, instr_pos: u16, instr: u8) !void {
   const info = debug_op_code(instr);
-  const nameWithDetails = info[1];
+  const name = info[0];
   const bytes = info[2];
 
-  writer.print("{X:0>4} ", .{
+  try writer.print("{X:0>4}  ", .{
     instr_pos
-  }) catch unreachable;
+  });
 
   for (0..3) |offset| {
     if (offset < bytes) {
-      writer.print("{X:0>2} ", .{
+      try writer.print("{X:0>2} ", .{
         cpu.bus.?.read(instr_pos + @as(u16, @intCast(offset)))
-      }) catch unreachable;
+      });
     } else {
-      writer.print("   ", .{}) catch unreachable;
+      try writer.print("   ", .{});
     }
   }
 
-  writer.print(" {s:<32}A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2} PPU:  0,    CYC:{d}\n",.{
-    nameWithDetails,
+  try writer.print(" {s} ", .{ name });
+
+  try switch (operand) {
+    .implied => writer.print("{s}", .{ " " ** 27 }),
+    .accumulator => writer.print("{s}", .{ " " ** 27 }),
+    .zeroPage => |o| writer.print("${X:0>2}{s}", .{ o, " " ** 25 }),
+    .indexedZeroPageX => |o| writer.print("X,${X:0>2}", .{ o }),
+    .indexedZeroPageY => |o| writer.print("Y,${X:0>2}", .{ o }),
+    .absolute => |o| writer.print("${X:0>4}", .{ o }),
+    .indexedAbsoluteX => |o| writer.print("X,${X:0>4}", .{ o }),
+    .indexedAbsoluteY => |o| writer.print("Y,${X:0>4}", .{ o }),
+    .indirectIndexed => |o| writer.print("(${X:0>4})", .{ o }),
+    .immediate => |o| writer.print("#${X:0>2}", .{ o }),
+    .relative => |o| writer.print("${X:0>4}", .{ add_i8(cpu.pc, o) }),
+    .indirect => |o| writer.print("#${X:0>4}", .{ o }),
+    .indexedIndirect => |o| writer.print("#${X:0>4}", .{ o }),
+  };
+
+
+  try writer.print(" A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2} PPU:  0,    CYC:{d}\n",.{
     cpu.a,
     cpu.x,
     cpu.y,
     @as(u8, @bitCast(cpu.p)),
     cpu.sp,
     cpu.cycles
-  }) catch unreachable;
+  });
 }
