@@ -27,7 +27,7 @@ pub const Op = union(std.meta.FieldEnum(AddrMode)) {
 const Flags = packed struct(u8) {
   carry: bool = false,
   zero: bool = false,
-  interrupt_disable: bool = false,
+  interrupt_disable: bool = true,
   decimal_mode: bool = false,
   break_command: bool = false,
   _padding: u1 = 1,
@@ -559,7 +559,7 @@ pub const CPU = struct {
   }
 
   fn php(self: *CPU) void {
-    self.push(@bitCast(self.p));
+    self.push(@as(u8, @bitCast(self.p)) | 0b10000);
     self.cycles += 3;
   }
 
@@ -584,6 +584,7 @@ pub const CPU = struct {
 
   fn plp(self: *CPU) void {
     self.p = @bitCast(self.pop());
+    self.p._padding = 1;
     self.cycles += 4;
   }
 
@@ -650,6 +651,11 @@ pub const CPU = struct {
 
   fn cld(self: *CPU) void {
     self.p.decimal_mode = false;
+    self.cycles += 2;
+  }
+
+  fn sed(self: *CPU) void {
+    self.p.decimal_mode = true;
     self.cycles += 2;
   }
 
@@ -793,6 +799,8 @@ pub const CPU = struct {
       0x78 => .{ .implied = &sei },
       // CLD - Clear Decimal Mode
       0xd8 => .{ .implied = &cld },
+      // SED - Set Decimal Flag
+      0xf8 => .{ .implied = &sed },
       else => CPUError.unmappedCode
     };
   }
