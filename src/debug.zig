@@ -291,22 +291,22 @@ pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, ins
     }
   }
 
-  try writer.print(" {s} ", .{ name });
+  try writer.print(" {s}", .{ name });
 
   try switch (operand) {
-    .implied => writer.print("{s}", .{ " " ** 27 }),
-    .accumulator => writer.print("{s}", .{ " " ** 27 }),
-    .zeroPage => |o| writer.print("${X:0>2}{s}", .{ o, " " ** 25 }),
-    .indexedZeroPageX => |o| writer.print("X,${X:0>2}", .{ o }),
-    .indexedZeroPageY => |o| writer.print("Y,${X:0>2}", .{ o }),
-    .absolute => |o| writer.print("${X:0>4}", .{ o }),
-    .indexedAbsoluteX => |o| writer.print("X,${X:0>4}", .{ o }),
-    .indexedAbsoluteY => |o| writer.print("Y,${X:0>4}", .{ o }),
-    .indirectIndexed => |o| writer.print("(${X:0>4})", .{ o }),
-    .immediate => |o| writer.print("#${X:0>2}", .{ o }),
-    .relative => |o| writer.print("${X:0>4}", .{ add_i8(cpu.pc, o) }),
-    .indirect => |o| writer.print("#${X:0>4}", .{ o }),
-    .indexedIndirect => |o| writer.print("#${X:0>4}", .{ o }),
+    .implied => writer.print("{s:<28}", .{ "" }),
+    .accumulator => writer.print("{s:<28}", .{ "" }),
+    .zeroPage => |o| writer.print(" ${X:0>2}{s:<24}", .{ o, "" }),
+    .indexedZeroPageX => |o| writer.print(" X,${X:0>2}{s:<22}", .{ o, "" }),
+    .indexedZeroPageY => |o| writer.print(" Y,${X:0>2}{s:<22}", .{ o, "" }),
+    .absolute => |o| writer.print(" ${X:0>4}{s:<22}", .{ o, "" }),
+    .indexedAbsoluteX => |o| writer.print(" X,${X:0>4}{s:<21}", .{ o, "" }),
+    .indexedAbsoluteY => |o| writer.print(" Y,${X:0>4}{s:<21}", .{ o, "" }),
+    .indirectIndexed => |o| writer.print(" (${X:0>4}){s:<21}", .{ o, "" }),
+    .immediate => |o| writer.print(" #${X:0>2}{s:<23}", .{ o, "" }),
+    .relative => |o| writer.print(" ${X:0>4}{s:<22}", .{ add_i8(cpu.pc, o), "" }),
+    .indirect => |o| writer.print(" #${X:0>4}{s:<22}", .{ o, "" }),
+    .indexedIndirect => |o| writer.print(" #${X:0>4}{s:<22}", .{ o, "" }),
   };
 
 

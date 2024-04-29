@@ -182,6 +182,10 @@ pub const CPU = struct {
 
     self.cycles += switch (dst) {
       .immediate => 2,
+      .zeroPage => 3,
+      .indexedZeroPageY => 4,
+      .absolute => 4,
+      .indexedAbsoluteX => 4, // TODO: +1 if page crossed
       else => unreachable,
     };
 
@@ -213,6 +217,22 @@ pub const CPU = struct {
     };
 
     const r = @addWithOverflow(self.a, m);
+    self.a = r[0];
+    self.set_cnz_flags(self.a, r[1] == 1);
+  }
+
+  fn sbc(self: *CPU, dst: AddrMode) void {
+     const m = self.eval_operand_value(dst);
+
+    self.cycles += switch (dst) {
+      .immediate => 2,
+      .absolute => 4,
+      else => unreachable,
+    };
+
+    const carry_num: u8 = if (self.p.carry) 1 else 0;
+
+    const r = @subWithOverflow(self.a, m + (1 - carry_num));
     self.a = r[0];
     self.set_cnz_flags(self.a, r[1] == 1);
   }
@@ -260,6 +280,24 @@ pub const CPU = struct {
     const b = self.eval_operand_value(dst);
 
     self.a &= b;
+
+    self.cycles += switch (dst) {
+      .immediate => 2,
+      .zeroPage => 3,
+      .indexedZeroPageX => 3,
+      .absolute => 4,
+      .indexedAbsoluteX => 4, // TODO: +1 if page crossed
+      .indexedAbsoluteY => 4, // TODO: +1 if page crossed
+      else => unreachable,
+    };
+
+    self.set_nz_flags(self.a);
+  }
+
+  fn cpu_or(self: *CPU, dst: AddrMode) void {
+    const b = self.eval_operand_value(dst);
+
+    self.a |= b;
 
     self.cycles += switch (dst) {
       .immediate => 2,
@@ -639,6 +677,11 @@ pub const CPU = struct {
     self.cycles += 2;
   }
 
+  fn clv(self: *CPU) void {
+    self.p.overflow = false;
+    self.cycles += 2;
+  }
+
   fn sec(self: *CPU) void {
     self.p.carry = true;
     self.cycles += 2;
@@ -682,9 +725,19 @@ pub const CPU = struct {
       0x2d => .{ .absolute = &cpu_and },
       0x3d => .{ .indexedAbsoluteX = &cpu_and },
       0x39 => .{ .indexedAbsoluteY = &cpu_and },
+      // ORA - Logical Inclusive OR
+      0x09 => .{ .immediate = &cpu_or },
+      0x05 => .{ .zeroPage = &cpu_or },
+      0x15 => .{ .indexedZeroPageX = &cpu_or },
+      0x0d => .{ .absolute = &cpu_or },
+      0x1d => .{ .indexedAbsoluteX = &cpu_or },
+      0x19 => .{ .indexedAbsoluteY = &cpu_or },
       // ADC - Add with Carry
       0x69 => .{ .immediate = &adc },
       0x6d => .{ .absolute = &adc },
+      // SBC - Add with Carry
+      0xe9 => .{ .immediate = &sbc },
+      0xed => .{ .absolute = &sbc },
       // TAY - Transfer Accumulator to Y
       0xa8 => .{ .implied = &tay },
       // TYA - Transfer Y to Accumulator
@@ -746,6 +799,10 @@ pub const CPU = struct {
       0xb1 => .{ .indirectIndexed = &lda },
       // LDX - Load X Register
       0xa2 => .{ .immediate = &ldx },
+      0xa6 => .{ .zeroPage = &ldx },
+      0xb6 => .{ .indexedZeroPageY = &ldx },
+      0xae => .{ .absolute = &ldx },
+      0xbe => .{ .indexedAbsoluteY = &ldx },
       // LDY - Load Y Register
       0xa0 => .{ .immediate = &ldy },
       0xa4 => .{ .zeroPage = &ldy },
@@ -793,6 +850,8 @@ pub const CPU = struct {
       0xea => .{ .implied = &nop },
       // CLC - Clear Carry Flag
       0x18 => .{ .implied = &clc },
+      // CLV - Clear Overflow Flag
+      0xb8 => .{ .implied = &clv },
       // SEC - Set Carry Flag
       0x38 => .{ .implied = &sec },
       // SEI - Set Interrupt Disable
