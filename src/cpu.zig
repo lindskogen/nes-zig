@@ -207,6 +207,20 @@ pub const CPU = struct {
     self.set_nz_flags(self.y);
   }
 
+  inline fn add_with_carry(self: *CPU, v: u16) void {
+    const carry_num: u16 = if (self.p.carry) 1 else 0;
+
+    const r: u16 = @as(u16, @intCast(self.a)) + v + carry_num;
+
+    self.p.carry = r > 255;
+    self.p.zero = (r & 0xff) == 0;
+
+    self.p.overflow = ((~(self.a ^ v) & (self.a ^ r)) & 0x80) > 0;
+    self.p.negative = (r & 0x80) > 0;
+
+    self.a = @truncate(r);
+  }
+
   fn adc(self: *CPU, dst: AddrMode) void {
      const m = self.eval_operand_value(dst);
 
@@ -216,9 +230,7 @@ pub const CPU = struct {
       else => unreachable,
     };
 
-    const r = @addWithOverflow(self.a, m);
-    self.a = r[0];
-    self.set_cnz_flags(self.a, r[1] == 1);
+    self.add_with_carry(m);
   }
 
   fn sbc(self: *CPU, dst: AddrMode) void {
@@ -230,11 +242,7 @@ pub const CPU = struct {
       else => unreachable,
     };
 
-    const carry_num: u8 = if (self.p.carry) 1 else 0;
-
-    const r = @subWithOverflow(self.a, m + (1 - carry_num));
-    self.a = r[0];
-    self.set_cnz_flags(self.a, r[1] == 1);
+    self.add_with_carry(m ^ 0xff);
   }
 
   fn cmp(self: *CPU, dst: AddrMode) void {
