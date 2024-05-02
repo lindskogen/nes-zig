@@ -605,7 +605,10 @@ pub const CPU = struct {
   }
 
   fn php(self: *CPU) void {
-    self.push(@as(u8, @bitCast(self.p)) | 0b10000);
+    var a = self.p;
+    a.break_command = true;
+    a._padding = 1;
+    self.push(@as(u8, @bitCast(a)));
     self.cycles += 3;
   }
 
@@ -630,6 +633,7 @@ pub const CPU = struct {
 
   fn plp(self: *CPU) void {
     self.p = @bitCast(self.pop());
+    self.p.break_command = false;
     self.p._padding = 1;
     self.cycles += 4;
   }
