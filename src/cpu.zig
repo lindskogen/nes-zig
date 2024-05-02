@@ -110,7 +110,7 @@ pub const CPU = struct {
     self.p = @bitCast(self.pop());
 
     self.p.break_command = false;
-    self.p._padding = 0;
+    self.p._padding = 1;
 
     self.pc = self.pop16();
     self.cycles += 6;
