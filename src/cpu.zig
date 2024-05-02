@@ -172,6 +172,8 @@ pub const CPU = struct {
 
   fn rts(self: *CPU) void {
     self.pc = self.pop16();
+    // JSR puts (pc-1) on the stack, we need to move ahead one step
+    self.pc += 1;
 
     self.cycles += 6;
     // No flags affected
