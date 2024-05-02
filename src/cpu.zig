@@ -228,7 +228,12 @@ pub const CPU = struct {
 
     self.cycles += switch (dst) {
       .immediate => 2,
+      .zeroPage => 3,
+      .indexedZeroPageX => 4,
       .absolute => 4,
+      .indexedAbsoluteX => 4,
+      .indexedAbsoluteY => 4,
+      .indirectIndexed => 5,
       else => unreachable,
     };
 
@@ -342,7 +347,12 @@ pub const CPU = struct {
       .absolute,
       .zeroPage => |k| self.read_bus(k),
       .immediate => |k| k,
-      .indirectIndexed => |k| self.read_bus(self.y + k),
+      .indirectIndexed => |k| a: {
+        const lsb: u16 = @intCast(self.read_bus(k + 0));
+        const msb: u16 = @intCast(self.read_bus(k + 1));
+        const vv = ((msb << 8) | lsb);
+        break :a self.read_bus(vv);
+      },
       .indexedZeroPageX => |k| self.read_bus(self.x + k),
       .indexedZeroPageY => |k| self.read_bus(self.y + k),
       .indexedAbsoluteX => |k| self.read_bus(self.x + k),
@@ -416,7 +426,7 @@ pub const CPU = struct {
   }
 
   inline fn branch(self: *CPU, dst: anytype, cond: bool) void {
-    const addr = switch (dst) {
+    const addr: i8 = switch (dst) {
       .relative => |v| v,
       else => unreachable,
     };
@@ -816,7 +826,12 @@ pub const CPU = struct {
       0x19 => .{ .indexedAbsoluteY = &cpu_or },
       // ADC - Add with Carry
       0x69 => .{ .immediate = &adc },
+      0x65 => .{ .zeroPage = &adc },
+      0x75 => .{ .indexedZeroPageX = &adc },
       0x6d => .{ .absolute = &adc },
+      0x7d => .{ .indexedAbsoluteX = &adc },
+      0x79 => .{ .indexedAbsoluteY = &adc },
+      0x71 => .{ .indirectIndexed = &adc },
       // SBC - Add with Carry
       0xe9 => .{ .immediate = &sbc },
       0xed => .{ .absolute = &sbc },
@@ -1053,12 +1068,9 @@ pub const CPU = struct {
       },
       .indirectIndexed => {
         const v = self.bus.?.read(self.pc);
-        const lsb: u16 = @intCast(self.bus.?.read(v + 0));
-        const msb: u16 = @intCast(self.bus.?.read(v + 1));
-        self.pc += 2;
-        const vv = ((msb << 8) | lsb);
+        self.pc += 1;
 
-        return .{ .indirectIndexed = vv };
+        return .{ .indirectIndexed = v };
       },
       .immediate => {
         const b: u8 = self.bus.?.read(self.pc);

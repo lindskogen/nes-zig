@@ -302,7 +302,7 @@ pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, ins
     .absolute => |o| writer.print(" ${X:0>4}{s:<22}", .{ o, "" }),
     .indexedAbsoluteX => |o| writer.print(" X,${X:0>4}{s:<20}", .{ o, "" }),
     .indexedAbsoluteY => |o| writer.print(" Y,${X:0>4}{s:<20}", .{ o, "" }),
-    .indirectIndexed => |o| writer.print(" (${X:0>4}){s:<20}", .{ o, "" }),
+    .indirectIndexed => |o| writer.print(" (${X:0>2}),Y{s:<20}", .{ o, "" }),
     .immediate => |o| writer.print(" #${X:0>2}{s:<23}", .{ o, "" }),
     .relative => |o| writer.print(" ${X:0>4}{s:<22}", .{ add_i8(cpu.pc, o), "" }),
     .indirect => |o| writer.print(" #${X:0>4}{s:<22}", .{ o, "" }),
