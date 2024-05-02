@@ -595,8 +595,8 @@ pub const CPU = struct {
   inline fn push16(self: *CPU, v: u16) void {
     const msb = @as(u8, @truncate(v >> 8));
     const lsb = @as(u8, @truncate(v));
-    self.push(lsb);
     self.push(msb);
+    self.push(lsb);
   }
 
   fn pha(self: *CPU) void {
@@ -620,8 +620,8 @@ pub const CPU = struct {
   }
 
   inline fn pop16(self: *CPU) u16 {
-    const msb = self.pop();
     const lsb = self.pop();
+    const msb = self.pop();
     return @as(u16, msb) << 8 | @as(u16, lsb);
   }
 
