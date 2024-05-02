@@ -159,7 +159,7 @@ pub const CPU = struct {
   }
 
   fn jsr(self: *CPU, dst: AddrMode) void {
-    self.push16(self.pc);
+    self.push16(self.pc - 1);
 
     self.pc = switch (dst) {
       .absolute => |v| v,
