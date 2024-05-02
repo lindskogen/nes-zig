@@ -573,6 +573,74 @@ pub const CPU = struct {
     self.set_cnz_flags(res, bit0 == 1);
   }
 
+  fn asl(self: *CPU, dst: AddrMode) void {
+    const m: u16 = @intCast(self.eval_operand_value(dst));
+
+    const res = m << 1;
+
+    self.p.carry = (res & 0xff00) > 0;
+    self.p.zero = (res & 0xff) == 0;
+    self.p.negative = (res & 0x80) != 0;
+
+
+    self.write_operand_value(dst, @truncate(res));
+
+    self.cycles += switch (dst) {
+      .accumulator => 2,
+      .zeroPage => 5,
+      .indexedZeroPageX => 6,
+      .absolute => 6,
+      .indexedAbsoluteX => 7,
+      else => unreachable,
+    };
+  }
+
+  fn ror(self: *CPU, dst: AddrMode) void {
+    const m = self.eval_operand_value(dst);
+
+    const bit0 = m & 0b1;
+
+    const carry_num: u8 = if (self.p.carry) 0x80 else 0;
+
+    const res = (m >> 1) | carry_num;
+
+    self.write_operand_value(dst, res);
+
+    self.cycles += switch (dst) {
+      .accumulator => 2,
+      .zeroPage => 5,
+      .indexedZeroPageX => 6,
+      .absolute => 6,
+      .indexedAbsoluteX => 7,
+      else => unreachable,
+    };
+
+    self.set_cnz_flags(res, bit0 != 0);
+  }
+
+  fn rol(self: *CPU, dst: AddrMode) void {
+    const m = self.eval_operand_value(dst);
+
+    const bit7 = m & 0x80;
+
+    const carry_num: u8 = if (self.p.carry) 1 else 0;
+
+    const res = (m << 1) | carry_num;
+
+    self.write_operand_value(dst, res);
+
+    self.cycles += switch (dst) {
+      .accumulator => 2,
+      .zeroPage => 5,
+      .indexedZeroPageX => 6,
+      .absolute => 6,
+      .indexedAbsoluteX => 7,
+      else => unreachable,
+    };
+
+    self.set_cnz_flags(res, bit7 != 0);
+  }
+
   fn bit(self: *CPU, dst: AddrMode) void {
     const m = self.eval_operand_value(dst);
 
@@ -855,6 +923,24 @@ pub const CPU = struct {
       // LSR - Logical Shift Right
       0x4a => .{ .accumulator = &lsr },
       0x4e => .{ .absolute = &lsr },
+      // ASL - Arithmetic Shift Left
+      0x0a => .{ .accumulator = &asl },
+      0x06 => .{ .zeroPage = &asl },
+      0x16 => .{ .indexedZeroPageX = &asl },
+      0x0e => .{ .absolute = &asl },
+      0x1e => .{ .indexedAbsoluteX = &asl },
+      // ROR - Rotate Right
+      0x6a => .{ .accumulator = &ror },
+      0x66 => .{ .zeroPage = &ror },
+      0x76 => .{ .indexedZeroPageX = &ror },
+      0x6e => .{ .absolute = &ror },
+      0x7e => .{ .indexedAbsoluteX = &ror },
+      // ROL - Rotate Left
+      0x2a => .{ .accumulator = &rol },
+      0x26 => .{ .zeroPage = &rol },
+      0x36 => .{ .indexedZeroPageX = &rol },
+      0x2e => .{ .absolute = &rol },
+      0x3e => .{ .indexedAbsoluteX = &rol },
       // NOP - No Operation
       0xc2,
       0x1a,
