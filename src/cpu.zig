@@ -379,12 +379,13 @@ pub const CPU = struct {
     self.a = self.eval_operand_value(dst);
 
     self.cycles += switch (dst) {
-      .indirectIndexed,
       .immediate => 2,
       .absolute,
       .indexedAbsoluteX,
       .indexedAbsoluteY => 4,
       .zeroPage => 3,
+      .indirectIndexed => 5,
+      .indexedIndirect => 6,
       else => unreachable,
     };
 
@@ -832,7 +833,11 @@ pub const CPU = struct {
       0x60 => .{ .implied = &rts },
       // EOR - Exclusive OR
       0x49 => .{ .immediate = &xor },
+      0x45 => .{ .zeroPage = &xor },
+      0x55 => .{ .indexedZeroPageX = &xor },
       0x4d => .{ .absolute = &xor },
+      0x5d => .{ .indexedAbsoluteX = &xor },
+      0x59 => .{ .indexedAbsoluteY = &xor },
       // AND - Logical AND
       0x29 => .{ .immediate = &cpu_and },
       0x25 => .{ .zeroPage = &cpu_and },
@@ -892,6 +897,7 @@ pub const CPU = struct {
       0x8d => .{ .absolute = &sta },
       0x9d => .{ .indexedAbsoluteX = &sta },
       0x99 => .{ .indexedAbsoluteY = &sta },
+      0x81 => .{ .indexedIndirect = &sta },
       0x91 => .{ .indirectIndexed = &sta },
       // STX - Store X Register
       0x86 => .{ .zeroPage = &stx },
@@ -916,6 +922,7 @@ pub const CPU = struct {
       0xbd => .{ .indexedAbsoluteX = &lda },
       0xb9 => .{ .indexedAbsoluteY = &lda },
       0xa5 => .{ .zeroPage = &lda },
+      0xa1 => .{ .indexedIndirect = &lda },
       0xb1 => .{ .indirectIndexed = &lda },
       // LDX - Load X Register
       0xa2 => .{ .immediate = &ldx },
