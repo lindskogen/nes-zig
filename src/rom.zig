@@ -6,7 +6,13 @@ const Flags6 = packed struct(u8) {
   vertically_mirrored: bool = false,
   battery_backed_prg_ram: bool = false,
   has_trainer: bool = false,
-  _padding: u5 = 0 // TODO: Map rest of Flags6
+  alternative_nametable_layout: bool = false,
+  lower_nybble_of_mapper_num: u4 = 0
+};
+
+const Flags7 = packed struct(u8) {
+  _unmapped: u4 = 0,
+  upper_nybble_of_mapper_num: u4 = 0
 };
 
 pub const ParseError = error { invalidHeader };
@@ -21,7 +27,7 @@ const Header = struct {
   /// 6	Flags 6 – Mapper, mirroring, battery, trainer
   flags6: Flags6 = Flags6 {},
   /// 7	Flags 7 – Mapper, VS/Playchoice, NES 2.0
-  flags7: u8 = 0,
+  flags7: Flags7 = Flags7 {},
   /// 8	Flags 8 – PRG-RAM size (rarely used extension)
   flags8: u8 = 0,
   /// 9	Flags 9 – TV system (rarely used extension)
@@ -43,7 +49,7 @@ const Header = struct {
       .prg_rom_size = slice[4],
       .chr_rom_size = slice[5],
       .flags6 = @bitCast(slice[6]),
-      .flags7 = slice[7],
+      .flags7 = @bitCast(slice[7]),
       .flags8 = slice[8],
       .flags9 = slice[9],
       .flags10 = slice[10],
@@ -54,6 +60,7 @@ const Header = struct {
 
 pub const Rom = struct {
   header: Header,
+  mapper: u8,
   buffer: []u8,
   unchecked: bool,
 
@@ -77,9 +84,17 @@ pub const Rom = struct {
     const chr_rom_start = start_offset_prg + prg_rom_len;
     const chr_rom_len = @as(usize, header.chr_rom_size) * 8192;
 
+    const mapper: u8 = (@as(u8, @intCast(header.flags7.upper_nybble_of_mapper_num)) << 4) | @as(u8, @intCast(header.flags6.lower_nybble_of_mapper_num));
+
+    if (mapper != 0) {
+      std.debug.print("Unimplemented mapper: {}\n", .{ mapper });
+      unreachable;
+    }
+
     return Rom {
       .buffer = rom_buffer,
       .header = header,
+      .mapper = mapper,
       .unchecked = false,
       .prg_slice = rom_buffer[start_offset_prg..(start_offset_prg + prg_rom_len)],
       .chr_slice = rom_buffer[chr_rom_start..(chr_rom_start + chr_rom_len)],
