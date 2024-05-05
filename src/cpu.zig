@@ -332,7 +332,11 @@ pub const CPU = struct {
 
     self.cycles += switch (dst) {
       .immediate => 2,
+      .zeroPage => 3,
+      .indexedZeroPageX => 4,
       .absolute => 4,
+      .indexedAbsoluteX => 4, // TODO: +1 if page crossed
+      .indexedAbsoluteY => 4, // TODO: +1 if page crossed
       else => unreachable,
     };
 
@@ -350,6 +354,13 @@ pub const CPU = struct {
       .indirectIndexed => |k| a: {
         const lsb: u16 = @intCast(self.read_bus(k + 0));
         const msb: u16 = @intCast(self.read_bus(k + 1));
+        const vv = ((msb << 8) | lsb);
+        break :a self.read_bus(vv + self.y);
+      },
+      .indexedIndirect => |k| a: {
+        const kk = k + self.x;
+        const lsb: u16 = @intCast(self.read_bus(kk + 0));
+        const msb: u16 = @intCast(self.read_bus(kk + 1));
         const vv = ((msb << 8) | lsb);
         break :a self.read_bus(vv);
       },
@@ -557,7 +568,19 @@ pub const CPU = struct {
       .accumulator => self.a = val,
       .absolute,
       .zeroPage => |k| self.write_bus(k, val),
-      .indirectIndexed => |k| self.write_bus(self.y + k, val),
+      .indirectIndexed => |k| a: {
+        const lsb: u16 = @intCast(self.read_bus(k + 0));
+        const msb: u16 = @intCast(self.read_bus(k + 1));
+        const vv = ((msb << 8) | lsb);
+        break :a self.write_bus(vv + self.y, val);
+      },
+      .indexedIndirect => |k| a: {
+        const kk = k + self.x;
+        const lsb: u16 = @intCast(self.read_bus(kk + 0));
+        const msb: u16 = @intCast(self.read_bus(kk + 1));
+        const vv = ((msb << 8) | lsb);
+        break :a self.write_bus(vv, val);
+      },
       .indexedZeroPageX => |k| self.write_bus(self.x + k, val),
       .indexedZeroPageY => |k| self.write_bus(self.y + k, val),
       .indexedAbsoluteX => |k| self.write_bus(self.x + k, val),
@@ -1001,6 +1024,7 @@ pub const CPU = struct {
       .indexedAbsoluteX => operand(self, .indexedAbsoluteX),
       .indexedAbsoluteY => operand(self, .indexedAbsoluteY),
       .indirectIndexed => operand(self, .indirectIndexed),
+      .indexedIndirect => operand(self, .indexedIndirect),
       .immediate => operand(self, .immediate),
       .relative => operand(self, .relative),
       else => unreachable,
@@ -1020,6 +1044,7 @@ pub const CPU = struct {
       .indexedAbsoluteX => |func| func(self, curr_operand),
       .indexedAbsoluteY => |func| func(self, curr_operand),
       .indirectIndexed => |func| func(self, curr_operand),
+      .indexedIndirect => |func| func(self, curr_operand),
       .immediate => |func| func(self, curr_operand),
       .relative => |func| func(self, curr_operand),
       else => unreachable,
@@ -1071,6 +1096,12 @@ pub const CPU = struct {
         self.pc += 1;
 
         return .{ .indirectIndexed = v };
+      },
+      .indexedIndirect => {
+        const v = self.bus.?.read(self.pc);
+        self.pc += 1;
+
+        return .{ .indexedIndirect = v };
       },
       .immediate => {
         const b: u8 = self.bus.?.read(self.pc);
