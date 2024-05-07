@@ -32,13 +32,14 @@ pub fn main() !void {
 
   nes.cpu.debug = std.io.getStdOut().writer();
 
-  var buf: [WIDTH * HEIGHT]u32 = undefined;
+  var game_buffer: [WIDTH * HEIGHT]u32 = undefined;
+  var screen_buffer: [WIDTH * SCALE * HEIGHT * SCALE]u32 = undefined;
 
   var f = std.mem.zeroInit(c.fenster, .{
-    .width = WIDTH,
-    .height = HEIGHT,
+    .width = WIDTH * SCALE,
+    .height = HEIGHT * SCALE,
     .title = "zig-nes",
-    .buf = &buf[0],
+    .buf = &screen_buffer[0],
   });
 
   _ = c.fenster_open(&f);
@@ -71,6 +72,16 @@ pub fn main() !void {
 
     nes.ppu.get_pattern_table(0, palette, &buf, 0);
     nes.ppu.get_pattern_table(1, palette, &buf, 128);
+
+    for (0..HEIGHT) |y| {
+      for (0..WIDTH) |x| {
+        inline for (0..2) |dx| {
+          inline for (0..2) |dy| {
+            screen_buffer[((y * SCALE) + dy) * WIDTH * SCALE + (x * SCALE) + dx] = game_buffer[y * WIDTH + x];
+          }
+        }
+      }
+    }
 
     t +%= 1;
     // Keep ~60 FPS
