@@ -275,19 +275,19 @@ pub const PPU = struct {
           var tile_msb: u8 = self.ppu_read(ii * 0x1000 + offset + @as(u16, @intCast(row)) + 8);
 
           for (0..8) |col| {
-            const pixel: u2 = @truncate((tile_lsb & 0x01) + (tile_msb & 0x01));
+            const pixel: u8 = @truncate((tile_lsb & 0x01) + (tile_msb & 0x01));
             tile_lsb >>= 1;
             tile_msb >>= 1;
 
             const x = tx * 8 + (7 - col);
             const y = ty * 8 + row;
+            _  = self.get_color_from_palette_ram(palette, pixel);
 
-            buf[y * 256 + x + sc_offset] = self.get_color_from_palette_ram(palette, pixel);
+            buf[y * 256 + x + sc_offset] = nesPalette[pixel];
           }
         }
       }
     }
-
   }
 };
 
