@@ -70,14 +70,16 @@ pub fn main() !void {
             nes.clock();
         }
 
-        nes.ppu.get_pattern_table(0, palette, &game_buffer, 0);
-        nes.ppu.get_pattern_table(1, palette, &game_buffer, 128);
+        if (t % 1000 == 0) {
+            nes.ppu.get_pattern_table(0, palette, &game_buffer, 0);
+            nes.ppu.get_pattern_table(1, palette, &game_buffer, 128);
 
-        for (0..HEIGHT) |y| {
-            for (0..WIDTH) |x| {
-                inline for (0..2) |dx| {
-                    inline for (0..2) |dy| {
-                        screen_buffer[((y * SCALE) + dy) * WIDTH * SCALE + (x * SCALE) + dx] = game_buffer[y * WIDTH + x];
+            for (0..HEIGHT) |y| {
+                for (0..WIDTH) |x| {
+                    inline for (0..2) |dx| {
+                        inline for (0..2) |dy| {
+                            screen_buffer[((y * SCALE) + dy) * WIDTH * SCALE + (x * SCALE) + dx] = game_buffer[y * WIDTH + x];
+                        }
                     }
                 }
             }
