@@ -36,7 +36,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-
     exe.addIncludePath(b.path("vendor"));
     exe.addCSourceFile(.{ .file = b.path("vendor/fenster.c") });
 
@@ -49,7 +48,7 @@ pub fn build(b: *std.Build) void {
         },
         else => {
             exe.linkSystemLibrary("X11");
-        }
+        },
     }
 
     exe.linkSystemLibrary("c");
