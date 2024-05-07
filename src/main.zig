@@ -70,8 +70,8 @@ pub fn main() !void {
             nes.clock();
         }
 
-        nes.ppu.get_pattern_table(0, palette, &buf, 0);
-        nes.ppu.get_pattern_table(1, palette, &buf, 128);
+        nes.ppu.get_pattern_table(0, palette, &game_buffer, 0);
+        nes.ppu.get_pattern_table(1, palette, &game_buffer, 128);
 
         for (0..HEIGHT) |y| {
             for (0..WIDTH) |x| {
