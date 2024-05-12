@@ -301,7 +301,7 @@ pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, ins
         .immediate => |o| writer.print(" #${X:0>2}{s:<23}", .{ o, "" }),
         .relative => |o| writer.print(" ${X:0>4}{s:<22}", .{ add_i8(cpu.pc, o), "" }),
         .indirect => |o| writer.print(" #${X:0>4}{s:<22}", .{ o, "" }),
-        .indexedIndirect => |o| writer.print(" #${X:0>4}{s:<22}", .{ o, "" }),
+        .indexedIndirect => |o| writer.print(" (${X:0>2},X) @ {X:0>2}{s:<22}", .{ o, o + cpu.x, "" }),
     };
 
     try writer.print(" A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2}\n", .{
