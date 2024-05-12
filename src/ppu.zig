@@ -119,12 +119,20 @@ pub const PPU = struct {
 
     pub fn cpu_write(self: *PPU, k: u16, v: u8) void {
         switch (k) {
+            // Control
             0x0000 => {
                 self.ctrl = @bitCast(v);
             },
+            // Mask
             0x0001 => {
                 self.mask = v;
             },
+            // OAM Data
+            0x0004 => {
+                std.debug.print("DMA {x} {x}\n", .{ k, v });
+                unreachable;
+            },
+            // Scroll
             0x0005 => {
                 if (self.w == .msb) {
                     self.scroll = (@as(u16, v) << 8) | @as(u8, @truncate(self.scroll));
@@ -134,22 +142,23 @@ pub const PPU = struct {
                     self.w = .msb;
                 }
             },
+            // PPU Address
             0x0006 => {
                 if (self.w == .msb) {
                     self.addr = (@as(u16, v) << 8) | @as(u8, @truncate(self.addr));
+                    std.debug.print("write msb {x}\n", .{(@as(u16, v) << 8)});
                     self.w = .lsb;
                 } else {
                     self.addr = @as(u16, v) | @as(u8, @truncate(self.addr >> 8));
+                    std.debug.print("write lsb {x}\n", .{@as(u16, v)});
                     self.w = .msb;
                 }
             },
+            // PPU Data
             0x0007 => {
+                std.debug.print("write to {x}", .{self.addr});
                 self.ppu_write(self.addr, v);
                 self.addr += self.ctrl.get_vram_increment();
-            },
-            0x0004 => {
-                std.debug.print("DMA {x} {x}\n", .{ k, v });
-                unreachable;
             },
             else => {
                 unreachable;
@@ -225,6 +234,7 @@ pub const PPU = struct {
                 }
             }
         } else if (k >= 0x3f00 and k <= 0x3fff) {
+            std.debug.print("write palette table! {} {}", .{ k, v });
             k &= 0x001f;
             k = switch (k) {
                 0x0010 => 0x0000,
