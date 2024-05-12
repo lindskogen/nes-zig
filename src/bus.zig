@@ -78,6 +78,11 @@ pub const Bus = struct {
             self.cpu.clock();
         }
 
+        if (self.ppu.nmi) {
+            self.ppu.nmi = false;
+            self.cpu.nmi();
+        }
+
         self.cycles += 1;
     }
 };

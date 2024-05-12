@@ -66,8 +66,10 @@ pub const PPU = struct {
 
     w: WriteLatch,
 
+    nmi: bool,
+
     pub fn init() PPU {
-        return PPU{ .rom = null, .internal = undefined, .ctrl = @bitCast(@as(u8, 0)), .w = .msb, .addr = 0, .scroll = 0, .mask = 0, .status = @bitCast(@as(u8, 0)), .nameTable = undefined, .patternTable = undefined, .paletteTable = undefined, .scanline = 0, .cycle = 0, .data_buffer = 0 };
+        return PPU{ .rom = null, .internal = undefined, .ctrl = @bitCast(@as(u8, 0)), .w = .msb, .addr = 0, .scroll = 0, .mask = 0, .status = @bitCast(@as(u8, 0)), .nmi = false, .nameTable = undefined, .patternTable = undefined, .paletteTable = undefined, .scanline = 0, .cycle = 0, .data_buffer = 0 };
     }
 
     pub fn load_rom(self: *PPU, rom: *const Rom) void {
@@ -75,6 +77,17 @@ pub const PPU = struct {
     }
 
     pub fn clock(self: *PPU) void {
+        if (self.scanline == -1 and self.cycle == 1) {
+            self.status.vertical_blank = false;
+        }
+
+        if (self.scanline == 241 and self.cycle == 1) {
+            self.status.vertical_blank = true;
+            if (self.ctrl.nmi_enabled) {
+                self.nmi = true;
+            }
+        }
+
         self.cycle += 1;
 
         if (self.cycle >= 341) {
@@ -90,12 +103,11 @@ pub const PPU = struct {
         return switch (k) {
             0x0000 => @bitCast(self.ctrl),
             0x0001 => @bitCast(self.mask),
-            0x0002 => {
-                self.status.vertical_blank = true;
+            0x0002 => a: {
                 const s: u8 = @bitCast(self.status);
                 self.status.vertical_blank = false;
                 self.w = .msb;
-                return s;
+                break :a s;
             },
             0x0005 => unreachable,
             0x0006 => unreachable,
