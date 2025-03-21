@@ -15,17 +15,17 @@ const Header = struct {
     prg_rom_size: u8 = 0,
     /// Size of CHR ROM in 8 KB units (value 0 means the board uses CHR RAM)
     chr_rom_size: u8 = 0,
-    /// 6	Flags 6 – Mapper, mirroring, battery, trainer
+    /// 6 Flags 6 – Mapper, mirroring, battery, trainer
     flags6: Flags6 = Flags6{},
-    /// 7	Flags 7 – Mapper, VS/Playchoice, NES 2.0
+    /// 7 Flags 7 – Mapper, VS/Playchoice, NES 2.0
     flags7: Flags7 = Flags7{},
-    /// 8	Flags 8 – PRG-RAM size (rarely used extension)
+    /// 8 Flags 8 – PRG-RAM size (rarely used extension)
     flags8: u8 = 0,
-    /// 9	Flags 9 – TV system (rarely used extension)
+    /// 9 Flags 9 – TV system (rarely used extension)
     flags9: u8 = 0,
-    /// 10	Flags 10 – TV system, PRG-RAM presence (unofficial, rarely used extension)
+    /// 10 Flags 10 – TV system, PRG-RAM presence (unofficial, rarely used extension)
     flags10: u8 = 0,
-    /// 11-15	Unused padding (should be filled with zero, but some rippers put their name across bytes 7-15)
+    /// 11-15 Unused padding (should be filled with zero, but some rippers put their name across bytes 7-15)
     _padding: [5]u8 = undefined,
 
     fn parse(slice: *[16]u8) !Header {
