@@ -18,9 +18,10 @@ zig-out/
 /build-*/
 /docgen_tmp/
 
-src/roms/
+roms
 *.bin
 *.nes
+*.log
 
 out
 *.swp

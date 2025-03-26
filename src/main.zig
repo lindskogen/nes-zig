@@ -5,6 +5,7 @@ const c = @cImport({
 });
 const Bus = @import("bus.zig").Bus;
 const rom = @import("rom.zig");
+const cpu_debug = @import("debug.zig");
 
 const SCALE: comptime_int = 2;
 const WIDTH: comptime_int = 256;
@@ -17,11 +18,26 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    const romName: []const u8 = if (args.len > 1) args[1] else "src/roms/nestest.nes";
+    if (args.len > 2 and std.mem.indexOf(u8, args[1], "disasm") != null) {
+        const romName: []const u8 = args[2];
+        const rom_buffer = try std.fs.cwd().readFile(romName, &max_rom_buffer);
+        const loaded_rom = try rom.Rom.load(rom_buffer);
+        try cpu_debug.disassemble(&loaded_rom, std.io.getStdOut().writer());
+        return;
+    }
+
+    const romName: []const u8 = if (args.len > 1) args[1] else "roms/nestest.nes";
+
+    std.debug.print("Loaded {s}\n", .{romName});
 
     const rom_buffer = try std.fs.cwd().readFile(romName, &max_rom_buffer);
 
-    const loaded_rom = try rom.Rom.load(rom_buffer);
+    const is_functional_test_rom = std.mem.indexOf(u8, romName, "6502_functional_test") != null;
+
+    const loaded_rom = if (is_functional_test_rom)
+        try rom.Rom.load_unchecked(rom_buffer)
+    else
+        try rom.Rom.load(rom_buffer);
 
     var nes: Bus = Bus.init();
     nes.cpu.bus = &nes;
@@ -29,6 +45,10 @@ pub fn main() !void {
     nes.load_rom(&loaded_rom);
 
     nes.reset();
+
+    if (is_functional_test_rom) {
+        nes.cpu.pc = 0x400;
+    }
 
     nes.cpu.debug = std.io.getStdOut().writer();
 
@@ -70,16 +90,14 @@ pub fn main() !void {
             nes.clock();
         }
 
-        if (t % 1000 == 0) {
-            nes.ppu.get_pattern_table(0, palette, &game_buffer, 0);
-            nes.ppu.get_pattern_table(1, palette, &game_buffer, 128);
+        nes.ppu.get_pattern_table(0, palette, &game_buffer, 0);
+        nes.ppu.get_pattern_table(1, palette, &game_buffer, 128);
 
-            for (0..HEIGHT) |y| {
-                for (0..WIDTH) |x| {
-                    inline for (0..2) |dx| {
-                        inline for (0..2) |dy| {
-                            screen_buffer[((y * SCALE) + dy) * WIDTH * SCALE + (x * SCALE) + dx] = game_buffer[y * WIDTH + x];
-                        }
+        for (0..HEIGHT) |y| {
+            for (0..WIDTH) |x| {
+                inline for (0..2) |dx| {
+                    inline for (0..2) |dy| {
+                        screen_buffer[((y * SCALE) + dy) * WIDTH * SCALE + (x * SCALE) + dx] = game_buffer[y * WIDTH + x];
                     }
                 }
             }

@@ -48,7 +48,7 @@ pub const Rom = struct {
     chr_slice: []u8,
 
     pub fn load_unchecked(rom_buffer: []u8) !Rom {
-        return Rom{ .buffer = rom_buffer[0..], .header = Header{}, .unchecked = true, .prg_slice = rom_buffer[0..], .chr_slice = &[_]u8{} };
+        return Rom{ .buffer = rom_buffer[0..], .mapper = 0, .header = Header{}, .unchecked = true, .prg_slice = rom_buffer[0..], .chr_slice = &[_]u8{} };
     }
 
     pub fn load(rom_buffer: []u8) !Rom {
@@ -66,7 +66,7 @@ pub const Rom = struct {
         }
 
         return Rom{
-            .buffer = rom_buffer,
+            .buffer = rom_buffer[16..],
             .header = header,
             .mapper = mapper,
             .unchecked = false,

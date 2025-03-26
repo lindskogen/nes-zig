@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const cpuMod = @import("cpu.zig");
+const Rom = @import("rom.zig");
 const AddrMode = @import("addr.zig").AddrMode;
 
 const CPU = cpuMod.CPU;
@@ -269,6 +270,31 @@ pub fn debug_op_code(code: u8) struct { []const u8, []const u8, u8 } {
 
 inline fn add_i8(a: u16, b: i8) u16 {
     return if (b >= 0) a + @abs(b) else a - @abs(b);
+}
+
+pub fn disassemble(rom: *const Rom.Rom, writer: std.fs.File.Writer) !void {
+    var instr_pos: usize = 0;
+
+    while (instr_pos < rom.buffer.len) : (instr_pos += 1) {
+        const instr = rom.buffer[instr_pos];
+
+        const info = debug_op_code(instr);
+        const name = info[1];
+        const bytes = info[2];
+
+        try writer.print("{X:0>4}  ", .{instr_pos});
+
+        for (0..3) |offset| {
+            if (offset < bytes) {
+                try writer.print("{X:0>2} ", .{rom.buffer[instr_pos + @as(u16, @intCast(offset))]});
+            } else {
+                try writer.print("   ", .{});
+            }
+        }
+        instr_pos += bytes;
+
+        try writer.print(" {s}\n", .{name});
+    }
 }
 
 pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, instr_pos: u16, instr: u8) !void {
