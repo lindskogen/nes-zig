@@ -133,12 +133,20 @@ pub const CPU = struct {
 
     fn jmp(self: *CPU, dst: AddrMode) void {
         self.pc = switch (dst) {
-            .indirect => |v| v,
+            .absolute => |v| v,
+            .indirect => |v| a: {
+                // 6502 page boundary bug: if low byte is 0xFF,
+                // high byte is fetched from the start of the same page
+                const lo: u16 = @intCast(self.read_bus(v));
+                const hi: u16 = @intCast(self.read_bus(if (v & 0x00FF == 0x00FF) v & 0xFF00 else v + 1));
+                break :a (hi << 8) | lo;
+            },
             else => unreachable,
         };
 
         self.cycles += switch (dst) {
-            .indirect => 3,
+            .absolute => 3,
+            .indirect => 5,
             else => unreachable,
         };
     }
@@ -184,7 +192,7 @@ pub const CPU = struct {
             .zeroPage => 3,
             .indexedZeroPageY => 4,
             .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO: +1 if page crossed
+            .indexedAbsoluteY => 4, // TODO: +1 if page crossed
             else => unreachable,
         };
 
@@ -282,7 +290,7 @@ pub const CPU = struct {
 
         self.cycles += switch (dst) {
             .immediate => 2,
-            .indexedZeroPageX => 3,
+            .zeroPage => 3,
             .absolute => 4,
             else => unreachable,
         };
@@ -295,7 +303,7 @@ pub const CPU = struct {
 
         self.cycles += switch (dst) {
             .immediate => 2,
-            .indexedZeroPageX => 3,
+            .zeroPage => 3,
             .absolute => 4,
             else => unreachable,
         };
@@ -316,6 +324,7 @@ pub const CPU = struct {
             .indexedAbsoluteX => 4, // TODO: +1 if page crossed
             .indexedAbsoluteY => 4, // TODO: +1 if page crossed
             .indexedIndirect => 6,
+            .indirectIndexed => 5, // TODO: +1 if page crossed
             else => unreachable,
         };
 
@@ -335,6 +344,7 @@ pub const CPU = struct {
             .indexedAbsoluteX => 4, // TODO: +1 if page crossed
             .indexedAbsoluteY => 4, // TODO: +1 if page crossed
             .indexedIndirect => 6,
+            .indirectIndexed => 5, // TODO: +1 if page crossed
             else => unreachable,
         };
 
@@ -352,6 +362,7 @@ pub const CPU = struct {
             .indexedAbsoluteX => 4, // TODO: +1 if page crossed
             .indexedAbsoluteY => 4, // TODO: +1 if page crossed
             .indexedIndirect => 6,
+            .indirectIndexed => 5, // TODO: +1 if page crossed
             else => unreachable,
         };
 
@@ -379,22 +390,24 @@ pub const CPU = struct {
                 }
             },
             .indirectIndexed => |k| a: {
-                const lsb: u16 = @intCast(self.read_bus(k + 0));
-                const msb: u16 = @intCast(self.read_bus(k + 1));
+                const zp: u8 = @truncate(k);
+                const lsb: u16 = @intCast(self.read_bus(zp));
+                const msb: u16 = @intCast(self.read_bus(zp +% 1));
                 const vv = ((msb << 8) | lsb);
-                break :a self.read_bus(vv + self.y);
+                break :a self.read_bus(vv +% @as(u16, self.y));
             },
             .indexedIndirect => |k| a: {
-                const kk = k + self.x;
-                const lsb: u16 = @intCast(self.read_bus(kk + 0));
-                const msb: u16 = @intCast(self.read_bus(kk + 1));
+                const zp: u8 = @truncate(k);
+                const kk = zp +% self.x;
+                const lsb: u16 = @intCast(self.read_bus(kk));
+                const msb: u16 = @intCast(self.read_bus(kk +% 1));
                 const vv = ((msb << 8) | lsb);
                 break :a self.read_bus(vv);
             },
-            .indexedZeroPageX => |k| self.read_bus(self.x + k),
-            .indexedZeroPageY => |k| self.read_bus(self.y + k),
-            .indexedAbsoluteX => |k| self.read_bus(self.x + k),
-            .indexedAbsoluteY => |k| self.read_bus(self.y + k),
+            .indexedZeroPageX => |k| self.read_bus(self.x +% k),
+            .indexedZeroPageY => |k| self.read_bus(self.y +% k),
+            .indexedAbsoluteX => |k| self.read_bus(@as(u16, self.x) +% k),
+            .indexedAbsoluteY => |k| self.read_bus(@as(u16, self.y) +% k),
             else => {
                 std.debug.print("{}", .{op});
                 unreachable;
@@ -409,6 +422,7 @@ pub const CPU = struct {
             .immediate => 2,
             .absolute, .indexedAbsoluteX, .indexedAbsoluteY => 4,
             .zeroPage => 3,
+            .indexedZeroPageX => 4,
             .indirectIndexed => 5,
             .indexedIndirect => 6,
             else => unreachable,
@@ -585,22 +599,24 @@ pub const CPU = struct {
             .accumulator => self.a = val,
             .absolute, .zeroPage => |k| self.write_bus(k, val),
             .indirectIndexed => |k| a: {
-                const lsb: u16 = @intCast(self.read_bus(k + 0));
-                const msb: u16 = @intCast(self.read_bus(k + 1));
+                const zp: u8 = @truncate(k);
+                const lsb: u16 = @intCast(self.read_bus(zp));
+                const msb: u16 = @intCast(self.read_bus(zp +% 1));
                 const vv = ((msb << 8) | lsb);
-                break :a self.write_bus(vv + self.y, val);
+                break :a self.write_bus(vv +% @as(u16, self.y), val);
             },
             .indexedIndirect => |k| a: {
-                const kk = k + self.x;
-                const lsb: u16 = @intCast(self.read_bus(kk + 0));
-                const msb: u16 = @intCast(self.read_bus(kk + 1));
+                const zp: u8 = @truncate(k);
+                const kk = zp +% self.x;
+                const lsb: u16 = @intCast(self.read_bus(kk));
+                const msb: u16 = @intCast(self.read_bus(kk +% 1));
                 const vv = ((msb << 8) | lsb);
                 break :a self.write_bus(vv, val);
             },
-            .indexedZeroPageX => |k| self.write_bus(self.x + k, val),
-            .indexedZeroPageY => |k| self.write_bus(self.y + k, val),
-            .indexedAbsoluteX => |k| self.write_bus(self.x + k, val),
-            .indexedAbsoluteY => |k| self.write_bus(self.y + k, val),
+            .indexedZeroPageX => |k| self.write_bus(self.x +% k, val),
+            .indexedZeroPageY => |k| self.write_bus(self.y +% k, val),
+            .indexedAbsoluteX => |k| self.write_bus(@as(u16, self.x) +% k, val),
+            .indexedAbsoluteY => |k| self.write_bus(@as(u16, self.y) +% k, val),
             else => unreachable,
         }
     }
@@ -615,7 +631,10 @@ pub const CPU = struct {
 
         self.cycles += switch (dst) {
             .accumulator => 2,
+            .zeroPage => 5,
+            .indexedZeroPageX => 6,
             .absolute => 6,
+            .indexedAbsoluteX => 7,
             else => unreachable,
         };
 
@@ -838,8 +857,8 @@ pub const CPU = struct {
             // RTI - Return from Interrupt
             0x40 => .{ .implied = &rti },
             // JMP - Jump
-            0x4c => .{ .indirect = &jmp },
-            // 0x6c => self.jmp(self.operand(bus, .indirect)),
+            0x4c => .{ .absolute = &jmp },
+            0x6c => .{ .indirect = &jmp },
             // JSR - Jump to Subroutine
             0x20 => .{ .absolute = &jsr }, // },
             // RTS - Return from Subroutine
@@ -852,6 +871,7 @@ pub const CPU = struct {
             0x5d => .{ .indexedAbsoluteX = &xor },
             0x59 => .{ .indexedAbsoluteY = &xor },
             0x41 => .{ .indexedIndirect = &xor },
+            0x51 => .{ .indirectIndexed = &xor },
             // AND - Logical AND
             0x29 => .{ .immediate = &cpu_and },
             0x25 => .{ .zeroPage = &cpu_and },
@@ -860,6 +880,7 @@ pub const CPU = struct {
             0x3d => .{ .indexedAbsoluteX = &cpu_and },
             0x39 => .{ .indexedAbsoluteY = &cpu_and },
             0x21 => .{ .indexedIndirect = &cpu_and },
+            0x31 => .{ .indirectIndexed = &cpu_and },
             // ORA - Logical Inclusive OR
             0x09 => .{ .immediate = &cpu_or },
             0x05 => .{ .zeroPage = &cpu_or },
@@ -868,6 +889,7 @@ pub const CPU = struct {
             0x1d => .{ .indexedAbsoluteX = &cpu_or },
             0x19 => .{ .indexedAbsoluteY = &cpu_or },
             0x01 => .{ .indexedIndirect = &cpu_or },
+            0x11 => .{ .indirectIndexed = &cpu_or },
             // ADC - Add with Carry
             0x69 => .{ .immediate = &adc },
             0x65 => .{ .zeroPage = &adc },
@@ -884,8 +906,8 @@ pub const CPU = struct {
             0xed => .{ .absolute = &sbc },
             0xfd => .{ .indexedAbsoluteX = &sbc },
             0xf9 => .{ .indexedAbsoluteY = &sbc },
-            0xe1 => .{ .indirectIndexed = &sbc },
-            0xf1 => .{ .indexedIndirect = &sbc },
+            0xe1 => .{ .indexedIndirect = &sbc },
+            0xf1 => .{ .indirectIndexed = &sbc },
             // TAY - Transfer Accumulator to Y
             0xa8 => .{ .implied = &tay },
             // TYA - Transfer Y to Accumulator
@@ -941,11 +963,11 @@ pub const CPU = struct {
             0xd1 => .{ .indirectIndexed = &cmp },
             // CPX - Compare X Register
             0xe0 => .{ .immediate = &cpx },
-            0xe4 => .{ .indexedZeroPageX = &cpx },
+            0xe4 => .{ .zeroPage = &cpx },
             0xec => .{ .absolute = &cpx },
             // CPY - Compare Y Register
             0xc0 => .{ .immediate = &cpy },
-            0xc4 => .{ .indexedZeroPageX = &cpy },
+            0xc4 => .{ .zeroPage = &cpy },
             0xcc => .{ .absolute = &cpy },
             // LDA - Load Accumulator
             0xa9 => .{ .immediate = &lda },
@@ -953,6 +975,7 @@ pub const CPU = struct {
             0xbd => .{ .indexedAbsoluteX = &lda },
             0xb9 => .{ .indexedAbsoluteY = &lda },
             0xa5 => .{ .zeroPage = &lda },
+            0xb5 => .{ .indexedZeroPageX = &lda },
             0xa1 => .{ .indexedIndirect = &lda },
             0xb1 => .{ .indirectIndexed = &lda },
             // LDX - Load X Register
@@ -998,7 +1021,10 @@ pub const CPU = struct {
             0x2c => .{ .absolute = &bit },
             // LSR - Logical Shift Right
             0x4a => .{ .accumulator = &lsr },
+            0x46 => .{ .zeroPage = &lsr },
+            0x56 => .{ .indexedZeroPageX = &lsr },
             0x4e => .{ .absolute = &lsr },
+            0x5e => .{ .indexedAbsoluteX = &lsr },
             // ASL - Arithmetic Shift Left
             0x0a => .{ .accumulator = &asl },
             0x06 => .{ .zeroPage = &asl },

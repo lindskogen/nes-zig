@@ -35,8 +35,17 @@ pub const Bus = struct {
             self.ram[k & 0x07ff] = v;
         } else if (k >= 0x2000 and k <= 0x3fff) {
             self.ppu.cpu_write(k & 0x0007, v);
-        } else if (k >= 0x4000 and k <= 0x4015) {
+        } else if (k >= 0x4000 and k <= 0x4013) {
             // TODO: APU
+        } else if (k == 0x4014) {
+            // OAM DMA - copy 256 bytes from CPU memory to OAM
+            const base: u16 = @as(u16, v) << 8;
+            for (0..256) |i| {
+                self.ppu.oam[i] = self.read(base + @as(u16, @intCast(i)));
+            }
+            // DMA takes 513/514 CPU cycles, but we'll ignore timing for now
+        } else if (k == 0x4015) {
+            // APU status
         } else if (k >= 0x4016 and k <= 0x4017) {
             self.controllers_cache[k & 0x0001] = self.controllers[k & 0x0001];
         } else {

@@ -43,17 +43,28 @@ const PPUCtrl = packed struct(u8) {
     }
 };
 
+const PPUMask = packed struct(u8) {
+    grayscale: bool,
+    show_background_left: bool,
+    show_sprites_left: bool,
+    show_background: bool,
+    show_sprites: bool,
+    emphasize_red: bool,
+    emphasize_green: bool,
+    emphasize_blue: bool,
+};
+
 const WriteLatch = enum { msb, lsb };
 
 pub const PPU = struct {
-    internal: [0x4000]u8,
     ctrl: PPUCtrl,
-    mask: u8, // TODO map this
+    mask: PPUMask,
     status: PPUStatus,
     rom: ?*const Rom,
 
     addr: u16,
-    scroll: u16,
+    scroll_x: u8,
+    scroll_y: u8,
 
     data_buffer: u8,
 
@@ -68,8 +79,48 @@ pub const PPU = struct {
 
     nmi: bool,
 
+    /// OAM (Object Attribute Memory) - 64 sprites, 4 bytes each
+    oam: [256]u8,
+    /// OAM address register
+    oam_addr: u8,
+
+    /// Frame buffer for rendered output (256x240 pixels)
+    frame_buffer: [256 * 240]u32,
+    /// Set to true when a frame has finished rendering
+    frame_complete: bool,
+
+    // Debug counters
+    debug_nt_writes: u32,
+    debug_ppudata_writes: u32,
+    debug_min_ppudata_addr: u16,
+    debug_max_ppudata_addr: u16,
+
     pub fn init() PPU {
-        return PPU{ .rom = null, .internal = undefined, .ctrl = @bitCast(@as(u8, 0)), .w = .msb, .addr = 0, .scroll = 0, .mask = 0, .status = @bitCast(@as(u8, 0)), .nmi = false, .nameTable = undefined, .patternTable = undefined, .paletteTable = undefined, .scanline = 0, .cycle = 0, .data_buffer = 0 };
+        return PPU{
+            .rom = null,
+            .ctrl = @bitCast(@as(u8, 0)),
+            .w = .msb,
+            .addr = 0,
+            .scroll_x = 0,
+            .scroll_y = 0,
+            .mask = @bitCast(@as(u8, 0)),
+            .status = @bitCast(@as(u8, 0)),
+            .nmi = false,
+            .nameTable = std.mem.zeroes([2][1024]u8),
+            .patternTable = std.mem.zeroes([2][4096]u8),
+            .paletteTable = std.mem.zeroes([32]u8),
+            .scanline = 0,
+            .cycle = 0,
+            .data_buffer = 0,
+            .oam = undefined,
+            .oam_addr = 0,
+            .frame_buffer = undefined,
+            .frame_complete = false,
+            .debug_nt_writes = 0,
+            .debug_ppudata_writes = 0,
+            .debug_min_ppudata_addr = 0xFFFF,
+            .debug_max_ppudata_addr = 0,
+        };
     }
 
     pub fn load_rom(self: *PPU, rom: *const Rom) void {
@@ -77,12 +128,40 @@ pub const PPU = struct {
     }
 
     pub fn clock(self: *PPU) void {
+        // Pre-render scanline
         if (self.scanline == -1 and self.cycle == 1) {
             self.status.vertical_blank = false;
+            self.status.sprite_0_hit = false;
+            self.status.sprite_overflow = false;
         }
 
+        // Visible scanlines (0-239)
+        if (self.scanline >= 0 and self.scanline < 240) {
+            // Visible cycles (1-256)
+            if (self.cycle >= 1 and self.cycle <= 256) {
+                self.render_pixel();
+            }
+        }
+
+        // Start of vblank
         if (self.scanline == 241 and self.cycle == 1) {
             self.status.vertical_blank = true;
+            self.frame_complete = true;
+            // Debug: count non-zero tiles in both nametables
+            var nz0: u16 = 0;
+            var nz1: u16 = 0;
+            for (0..960) |i| {
+                if (self.ppu_read(0x2000 + @as(u16, @intCast(i))) != 0) nz0 += 1;
+                if (self.ppu_read(0x2400 + @as(u16, @intCast(i))) != 0) nz1 += 1;
+            }
+            // Also check raw nameTable arrays
+            var raw0: u16 = 0;
+            var raw1: u16 = 0;
+            for (0..960) |i| {
+                if (self.nameTable[0][i] != 0) raw0 += 1;
+                if (self.nameTable[1][i] != 0) raw1 += 1;
+            }
+            // Simplified debug - removed for now
             if (self.ctrl.nmi_enabled) {
                 self.nmi = true;
             }
@@ -95,22 +174,94 @@ pub const PPU = struct {
             self.scanline += 1;
             if (self.scanline >= 261) {
                 self.scanline = -1;
+                self.frame_complete = false;
             }
         }
+    }
+
+    fn render_pixel(self: *PPU) void {
+        const x: u16 = @intCast(self.cycle - 1);
+        const y: u16 = @intCast(self.scanline);
+
+        var bg_pixel: u8 = 0;
+        var bg_palette: u8 = 0;
+
+        if (self.mask.show_background) {
+            // Calculate tile coordinates in nametable
+            const tile_x = x / 8;
+            const tile_y = y / 8;
+
+            // Fine x and y within the tile
+            const fine_x: u3 = @truncate(x);
+            const fine_y: u3 = @truncate(y);
+
+            // Get nametable address based on base_nametable_addr
+            const nametable_base: u16 = 0x2000 + @as(u16, self.ctrl.base_nametable_addr) * 0x400;
+
+            // Get tile index from nametable
+            const tile_addr = nametable_base + tile_y * 32 + tile_x;
+            const tile_id = self.ppu_read(tile_addr);
+
+            // Get pattern table address
+            const pattern_base: u16 = @as(u16, self.ctrl.background_pattern_table_address) * 0x1000;
+            const pattern_addr = pattern_base + @as(u16, tile_id) * 16 + fine_y;
+
+            // Read the two bit planes for this row
+            const tile_lsb = self.ppu_read(pattern_addr);
+            const tile_msb = self.ppu_read(pattern_addr + 8);
+
+            // Extract the pixel (bit 7 is leftmost pixel)
+            const bit_shift: u3 = 7 - fine_x;
+            const pixel_lsb: u8 = (tile_lsb >> bit_shift) & 1;
+            const pixel_msb: u8 = (tile_msb >> bit_shift) & 1;
+            bg_pixel = (pixel_msb << 1) | pixel_lsb;
+
+            // Get attribute byte for palette selection
+            // Attribute table is at nametable_base + 0x3C0
+            // Each byte covers 4x4 tiles (32x32 pixels)
+            const attr_x = tile_x / 4;
+            const attr_y = tile_y / 4;
+            const attr_addr = nametable_base + 0x3C0 + attr_y * 8 + attr_x;
+            const attr_byte = self.ppu_read(attr_addr);
+
+            // Each attribute byte has 4 palettes for 4 2x2 tile groups
+            // Bits 0-1: top-left, 2-3: top-right, 4-5: bottom-left, 6-7: bottom-right
+            const attr_shift: u3 = @truncate(((tile_y & 2) << 1) | (tile_x & 2));
+            bg_palette = (attr_byte >> attr_shift) & 0x03;
+        }
+
+        // Get the final color
+        var color: u32 = undefined;
+        if (bg_pixel == 0) {
+            // Transparent - use background color
+            color = self.get_color_from_palette_ram(0, 0);
+        } else {
+            color = self.get_color_from_palette_ram(bg_palette, bg_pixel);
+        }
+
+        // Write to frame buffer
+        const idx = y * 256 + x;
+        self.frame_buffer[idx] = color;
     }
 
     pub fn cpu_read(self: *PPU, k: u16) u8 {
         return switch (k) {
             0x0000 => @bitCast(self.ctrl),
-            0x0001 => @bitCast(self.mask),
+            0x0001 => @as(u8, @bitCast(self.mask)),
             0x0002 => a: {
                 const s: u8 = @bitCast(self.status);
                 self.status.vertical_blank = false;
                 self.w = .msb;
                 break :a s;
             },
-            0x0005 => unreachable,
-            0x0006 => unreachable,
+            // OAMADDR is write-only
+            0x0003 => 0,
+            // OAM Data
+            0x0004 => self.oam[self.oam_addr],
+            // PPUSCROLL is write-only
+            0x0005 => 0,
+            // PPUADDR is write-only
+            0x0006 => 0,
             0x0007 => a: {
                 var d = self.data_buffer;
 
@@ -137,38 +288,42 @@ pub const PPU = struct {
             },
             // Mask
             0x0001 => {
-                self.mask = v;
+                self.mask = @bitCast(v);
+            },
+            // OAM Address
+            0x0003 => {
+                self.oam_addr = v;
             },
             // OAM Data
             0x0004 => {
-                std.debug.print("DMA {x} {x}\n", .{ k, v });
-                unreachable;
+                self.oam[self.oam_addr] = v;
+                self.oam_addr +%= 1;
             },
             // Scroll
             0x0005 => {
                 if (self.w == .msb) {
-                    self.scroll = (@as(u16, v) << 8) | @as(u8, @truncate(self.scroll));
+                    self.scroll_x = v;
                     self.w = .lsb;
                 } else {
-                    self.scroll = @as(u16, v) | @as(u8, @truncate(self.scroll >> 8));
+                    self.scroll_y = v;
                     self.w = .msb;
                 }
             },
             // PPU Address
             0x0006 => {
                 if (self.w == .msb) {
-                    self.addr = (@as(u16, v) << 8) | @as(u8, @truncate(self.addr));
-                    std.debug.print("write msb {x}\n", .{(@as(u16, v) << 8)});
+                    self.addr = (@as(u16, v) << 8) | (self.addr & 0x00FF);
                     self.w = .lsb;
                 } else {
-                    self.addr = @as(u16, v) | @as(u8, @truncate(self.addr >> 8));
-                    std.debug.print("write lsb {x}\n", .{@as(u16, v)});
+                    self.addr = (self.addr & 0xFF00) | @as(u16, v);
                     self.w = .msb;
                 }
             },
             // PPU Data
             0x0007 => {
-                std.debug.print("write to {x}", .{self.addr});
+                self.debug_ppudata_writes += 1;
+                if (self.addr < self.debug_min_ppudata_addr) self.debug_min_ppudata_addr = self.addr;
+                if (self.addr > self.debug_max_ppudata_addr) self.debug_max_ppudata_addr = self.addr;
                 self.ppu_write(self.addr, v);
                 self.addr += self.ctrl.get_vram_increment();
             },
@@ -226,6 +381,7 @@ pub const PPU = struct {
         if (self.rom.?.write_chr(k, v)) {} else if (k >= 0x0000 and k <= 0x1fff) {
             self.patternTable[(k & 0x1000) >> 12][k & 0x0fff] = v;
         } else if (k >= 0x2000 and k <= 0x3eff) {
+            self.debug_nt_writes += 1;
             k &= 0x0fff;
 
             if (self.rom.?.header.flags6.vertically_mirrored) {
@@ -246,7 +402,6 @@ pub const PPU = struct {
                 }
             }
         } else if (k >= 0x3f00 and k <= 0x3fff) {
-            std.debug.print("write palette table! {} {}", .{ k, v });
             k &= 0x001f;
             k = switch (k) {
                 0x0010 => 0x0000,

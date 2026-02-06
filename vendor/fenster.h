@@ -128,7 +128,7 @@ FENSTER_API void fenster_close(struct fenster *f) {
 }
 
 // clang-format off
-static const uint8_t FENSTER_KEYCODES[128] = {65,83,68,70,72,71,90,88,67,86,0,66,81,87,69,82,89,84,49,50,51,52,54,53,61,57,55,45,56,48,93,79,85,91,73,80,10,76,74,39,75,59,92,44,47,78,77,46,9,32,96,8,0,27,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,26,2,3,127,0,5,0,4,0,20,19,18,17,0};
+static const uint8_t FENSTER_KEYCODES[128] = {65,83,68,70,72,71,90,88,67,86,0,66,81,87,69,82,89,84,49,50,51,52,54,53,61,57,55,45,56,48,93,79,85,91,73,80,10,76,74,39,75,59,92,44,47,78,77,46,9,32,96,8,0,27,0,0,15,0,0,0,16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,26,2,3,127,0,5,0,4,0,20,19,18,17,0};
 // clang-format on
 FENSTER_API int fenster_loop(struct fenster *f) {
   msg1(void, msg(id, f->wnd, "contentView"), "setNeedsDisplay:", BOOL, YES);
@@ -157,6 +157,21 @@ FENSTER_API int fenster_loop(struct fenster *f) {
     NSUInteger k = msg(NSUInteger, ev, "keyCode");
     f->keys[k < 127 ? FENSTER_KEYCODES[k] : 0] = evtype == 10;
     NSUInteger mod = msg(NSUInteger, ev, "modifierFlags") >> 17;
+    f->mod = (mod & 0xc) | ((mod & 1) << 1) | ((mod >> 1) & 1);
+    return 0;
+  }
+  case 12: /*NSEventTypeFlagsChanged*/ {
+    NSUInteger k = msg(NSUInteger, ev, "keyCode");
+    NSUInteger mod = msg(NSUInteger, ev, "modifierFlags");
+    int pressed = 0;
+    switch (k) {
+    case 56: case 60: pressed = !!(mod & 0x20000); break;  /* Shift */
+    case 59: case 62: pressed = !!(mod & 0x40000); break;  /* Control */
+    case 58: case 61: pressed = !!(mod & 0x80000); break;  /* Option */
+    case 55: case 54: pressed = !!(mod & 0x100000); break; /* Command */
+    }
+    f->keys[k < 128 ? FENSTER_KEYCODES[k] : 0] = pressed;
+    mod >>= 17;
     f->mod = (mod & 0xc) | ((mod & 1) << 1) | ((mod >> 1) & 1);
     return 0;
   }
