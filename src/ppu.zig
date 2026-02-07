@@ -87,7 +87,10 @@ pub const PPU = struct {
 
     w: WriteLatch,
 
-    nmi: bool,
+    nmi_output: bool,
+
+    // DEBUG
+    trace_writes: bool = false,
 
     /// OAM (Object Attribute Memory) - 64 sprites, 4 bytes each
     oam: [256]u8,
@@ -109,7 +112,7 @@ pub const PPU = struct {
             .fine_x = 0,
             .mask = @bitCast(@as(u8, 0)),
             .status = @bitCast(@as(u8, 0)),
-            .nmi = false,
+            .nmi_output = false,
             .nameTable = std.mem.zeroes([2][1024]u8),
             .patternTable = std.mem.zeroes([2][4096]u8),
             .paletteTable = std.mem.zeroes([32]u8),
@@ -137,6 +140,7 @@ pub const PPU = struct {
             self.status.vertical_blank = false;
             self.status.sprite_0_hit = false;
             self.status.sprite_overflow = false;
+            self.nmi_output = false;
         }
 
         // Visible scanlines: render pixels
@@ -172,7 +176,7 @@ pub const PPU = struct {
             self.status.vertical_blank = true;
             self.frame_complete = true;
             if (self.ctrl.nmi_enabled) {
-                self.nmi = true;
+                self.nmi_output = true;
             }
         }
 
@@ -365,6 +369,7 @@ pub const PPU = struct {
             0x0002 => a: {
                 const s: u8 = @bitCast(self.status);
                 self.status.vertical_blank = false;
+                self.nmi_output = false;
                 self.w = .msb;
                 break :a s;
             },
@@ -399,9 +404,18 @@ pub const PPU = struct {
         switch (k) {
             // Control
             0x0000 => {
+                const old_nmi_enabled = self.ctrl.nmi_enabled;
                 self.ctrl = @bitCast(v);
                 // Update nametable select bits in t
                 self.t = (self.t & ~@as(u16, 0x0C00)) | (@as(u16, v & 0x03) << 10);
+                // NMI edge case: if NMI just enabled while vblank is set, raise nmi_output
+                if (!old_nmi_enabled and self.ctrl.nmi_enabled and self.status.vertical_blank) {
+                    self.nmi_output = true;
+                }
+                // If NMI just disabled, lower nmi_output
+                if (old_nmi_enabled and !self.ctrl.nmi_enabled) {
+                    self.nmi_output = false;
+                }
             },
             // Mask
             0x0001 => {
@@ -435,15 +449,24 @@ pub const PPU = struct {
                     // First write: set high byte of t, clear bit 14
                     self.t = (@as(u16, v & 0x3F) << 8) | (self.t & 0x00FF);
                     self.w = .lsb;
+                    if (self.trace_writes) {
+                        std.debug.print("$2006.hi=${x:0>2} t=${x:0>4}\n", .{ v, self.t });
+                    }
                 } else {
                     // Second write: set low byte of t, copy t to v
                     self.t = (self.t & 0xFF00) | @as(u16, v);
                     self.v = self.t;
                     self.w = .msb;
+                    if (self.trace_writes) {
+                        std.debug.print("$2006.lo=${x:0>2} v=${x:0>4}\n", .{ v, self.v });
+                    }
                 }
             },
             // PPU Data
             0x0007 => {
+                if (self.trace_writes) {
+                    std.debug.print("$2007 v=${x:0>4} val=${x:0>2}\n", .{ self.v & 0x3FFF, v });
+                }
                 self.ppu_write(self.v & 0x3FFF, v);
                 self.v +%= self.ctrl.get_vram_increment();
             },

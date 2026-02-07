@@ -1,5 +1,4 @@
 const cpu_debug = @import("debug.zig");
-const AddrMode = @import("addr.zig").AddrMode;
 const Bus = @import("bus.zig").Bus;
 const rom = @import("rom.zig");
 const std = @import("std");
@@ -7,22 +6,6 @@ const std = @import("std");
 inline fn is_negative(v: u8) bool {
     return @clz(v) == 0;
 }
-
-pub const Op = union(std.meta.FieldEnum(AddrMode)) {
-    zeroPage: *const (fn (self: *CPU, dst: AddrMode) void),
-    indexedZeroPageX: *const (fn (self: *CPU, dst: AddrMode) void),
-    indexedZeroPageY: *const (fn (self: *CPU, dst: AddrMode) void),
-    absolute: *const (fn (self: *CPU, dst: AddrMode) void),
-    indexedAbsoluteX: *const (fn (self: *CPU, dst: AddrMode) void),
-    indexedAbsoluteY: *const (fn (self: *CPU, dst: AddrMode) void),
-    indirect: *const (fn (self: *CPU, dst: AddrMode) void),
-    implied: *const (fn (self: *CPU) void),
-    accumulator: *const (fn (self: *CPU, dst: AddrMode) void),
-    immediate: *const (fn (self: *CPU, dst: AddrMode) void),
-    relative: *const (fn (self: *CPU, dst: AddrMode) void),
-    indexedIndirect: *const (fn (self: *CPU, dst: AddrMode) void),
-    indirectIndexed: *const (fn (self: *CPU, dst: AddrMode) void),
-};
 
 const Flags = packed struct(u8) {
     carry: bool = false,
@@ -34,8 +17,6 @@ const Flags = packed struct(u8) {
     overflow: bool = false,
     negative: bool = false,
 };
-
-const CPUError = error{unmappedCode};
 
 pub const CPU = struct {
     bus: ?*Bus,
@@ -52,20 +33,40 @@ pub const CPU = struct {
     /// N, V, _, B, D, I, Z, C
     p: Flags,
 
-    cycles: u32,
+    // Cycle-stepped state machine fields
+    opcode: u8 = 0,
+    step: u4 = 0,
+    addr: u16 = 0,
+    ptr: u8 = 0,
+    data: u8 = 0,
+    data2: u8 = 0, // secondary latch (page-cross flag in bit 0)
+
+    total_cycles: u64 = 0,
+
+    // Interrupt lines (driven by bus wiring)
+    nmi_line: bool = false,
+    nmi_prev: bool = false,
+    nmi_pending: bool = false,
+    irq_line: bool = false,
+    interrupt_pending: InterruptType = .none,
+
+    const InterruptType = enum { none, nmi, irq };
 
     pub fn init() CPU {
-        return .{ .bus = null, .p = Flags{}, .debug = null, .a = 0, .x = 0, .y = 0, .sp = 0xfd, .pc = 0, .cycles = 0 };
+        return .{
+            .bus = null,
+            .p = Flags{},
+            .debug = null,
+            .a = 0,
+            .x = 0,
+            .y = 0,
+            .sp = 0xfd,
+            .pc = 0,
+        };
     }
 
     pub fn complete(self: *CPU) bool {
-        return self.cycles == 0;
-    }
-
-    inline fn read_u16(self: *CPU, addr: u16) u16 {
-        const lsb = @as(u16, self.bus.?.read(addr + 0));
-        const msb = @as(u16, self.bus.?.read(addr + 1));
-        return (msb << 8) | lsb;
+        return self.step == 0;
     }
 
     pub fn reset(self: *CPU) void {
@@ -75,50 +76,18 @@ pub const CPU = struct {
         self.sp = 0xfd;
         self.p = Flags{};
 
-        self.pc = self.read_u16(0xfffc);
+        // Read reset vector
+        const lo: u16 = self.read(0xfffc);
+        const hi: u16 = self.read(0xfffd);
+        self.pc = (hi << 8) | lo;
 
-        self.cycles = 8;
-    }
-
-    pub fn irq(self: *CPU) void {
-        if (!self.p.interrupt_disable) {
-            self.push16(self.pc);
-            self.p.break_command = false;
-            self.p._padding = 1;
-            self.p.interrupt_disable = true;
-
-            self.push(@bitCast(self.p));
-            self.pc = self.read_u16(0xfffe);
-            self.cycles = 7;
-        }
-    }
-
-    pub fn nmi(self: *CPU) void {
-        self.push16(self.pc);
-        self.p.break_command = false;
-        self.p._padding = 1;
-        self.p.interrupt_disable = true;
-
-        self.push(@bitCast(self.p));
-        self.pc = self.read_u16(0xfffa);
-        self.cycles = 8;
-    }
-
-    pub fn rti(self: *CPU) void {
-        self.p = @bitCast(self.pop());
-
-        self.p.break_command = false;
-        self.p._padding = 1;
-
-        self.pc = self.pop16();
-        self.cycles += 6;
-    }
-
-    pub fn clock(self: *CPU) void {
-        if (self.cycles == 0) {
-            self.step();
-        }
-        self.cycles -= 1;
+        self.step = 0;
+        self.opcode = 0;
+        self.nmi_line = false;
+        self.nmi_prev = false;
+        self.nmi_pending = false;
+        self.irq_line = false;
+        self.interrupt_pending = .none;
     }
 
     fn set_nz_flags(self: *CPU, v: u8) void {
@@ -126,1061 +95,1718 @@ pub const CPU = struct {
         self.p.negative = is_negative(v);
     }
 
-    fn set_cnz_flags(self: *CPU, v: u8, carry: bool) void {
-        self.set_nz_flags(v);
-        self.p.carry = carry;
-    }
-
-    fn jmp(self: *CPU, dst: AddrMode) void {
-        self.pc = switch (dst) {
-            .absolute => |v| v,
-            .indirect => |v| a: {
-                // 6502 page boundary bug: if low byte is 0xFF,
-                // high byte is fetched from the start of the same page
-                const lo: u16 = @intCast(self.read_bus(v));
-                const hi: u16 = @intCast(self.read_bus(if (v & 0x00FF == 0x00FF) v & 0xFF00 else v + 1));
-                break :a (hi << 8) | lo;
-            },
-            else => unreachable,
-        };
-
-        self.cycles += switch (dst) {
-            .absolute => 3,
-            .indirect => 5,
-            else => unreachable,
-        };
-    }
-
-    fn brk(self: *CPU) void {
-        self.p.interrupt_disable = true;
-        self.push16(self.pc);
-
-        self.p.break_command = true;
-        self.push(@bitCast(self.p));
-        self.p.break_command = false;
-
-        self.pc = self.read_u16(0xfffe);
-        self.cycles += 7;
-    }
-
-    fn jsr(self: *CPU, dst: AddrMode) void {
-        self.push16(self.pc - 1);
-
-        self.pc = switch (dst) {
-            .absolute => |v| v,
-            else => unreachable,
-        };
-
-        self.cycles += 6;
-        // No flags affected
-    }
-
-    fn rts(self: *CPU) void {
-        self.pc = self.pop16();
-        // JSR puts (pc-1) on the stack, we need to move ahead one step
-        self.pc += 1;
-
-        self.cycles += 6;
-        // No flags affected
-    }
-
-    fn ldx(self: *CPU, dst: AddrMode) void {
-        self.x = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageY => 4,
-            .absolute => 4,
-            .indexedAbsoluteY => 4, // TODO: +1 if page crossed
-            else => unreachable,
-        };
-
-        self.set_nz_flags(self.x);
-    }
-
-    fn ldy(self: *CPU, dst: AddrMode) void {
-        self.y = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageX => 4,
-            .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO: +1 if page crossed
-            else => unreachable,
-        };
-
-        self.set_nz_flags(self.y);
-    }
-
     inline fn add_with_carry(self: *CPU, v: u16) void {
         const carry_num: u16 = if (self.p.carry) 1 else 0;
-
         const r: u16 = @as(u16, @intCast(self.a)) + v + carry_num;
-
         self.p.carry = r > 255;
         self.p.zero = (r & 0xff) == 0;
-
         self.p.overflow = ((~(self.a ^ v) & (self.a ^ r)) & 0x80) > 0;
         self.p.negative = (r & 0x80) > 0;
-
         self.a = @truncate(r);
     }
 
-    fn adc(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageX => 4,
-            .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO (+1 if page crossed)
-            .indexedAbsoluteY => 4, // TODO (+1 if page crossed)
-            .indexedIndirect => 6,
-            .indirectIndexed => 5, // TODO (+1 if page crossed)
-            else => unreachable,
-        };
-
-        self.add_with_carry(m);
-    }
-
-    fn sbc(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageX => 4,
-            .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO (+1 if page crossed)
-            .indexedAbsoluteY => 4, // TODO (+1 if page crossed)
-            .indexedIndirect => 6,
-            .indirectIndexed => 5, // TODO (+1 if page crossed)
-            else => unreachable,
-        };
-
-        self.add_with_carry(m ^ 0xff);
-    }
-
-    fn cmp(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        // std.debug.print("{b:0>8} {b:0>8}\n", .{self.a, m});
-        // std.debug.print("{x} {x}\n", .{self.a, m});
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageX => 4,
-            .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO: +1 if page crossed
-            .indexedAbsoluteY => 4, // TODO: +1 if page crossed
-            .indexedIndirect => 6,
-            .indirectIndexed => 5, // TODO: +1 if page crossed
-            else => unreachable,
-        };
-
-        self.set_cnz_flags(self.a -% m, self.a >= m);
-    }
-
-    fn cpx(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .absolute => 4,
-            else => unreachable,
-        };
-
-        self.set_cnz_flags(self.x -% m, self.x >= m);
-    }
-
-    fn cpy(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .absolute => 4,
-            else => unreachable,
-        };
-
-        self.set_cnz_flags(self.y -% m, self.y >= m);
-    }
-
-    fn cpu_and(self: *CPU, dst: AddrMode) void {
-        const b = self.eval_operand_value(dst);
-
-        self.a &= b;
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageX => 3,
-            .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO: +1 if page crossed
-            .indexedAbsoluteY => 4, // TODO: +1 if page crossed
-            .indexedIndirect => 6,
-            .indirectIndexed => 5, // TODO: +1 if page crossed
-            else => unreachable,
-        };
-
-        self.set_nz_flags(self.a);
-    }
-
-    fn cpu_or(self: *CPU, dst: AddrMode) void {
-        const b = self.eval_operand_value(dst);
-
-        self.a |= b;
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageX => 3,
-            .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO: +1 if page crossed
-            .indexedAbsoluteY => 4, // TODO: +1 if page crossed
-            .indexedIndirect => 6,
-            .indirectIndexed => 5, // TODO: +1 if page crossed
-            else => unreachable,
-        };
-
-        self.set_nz_flags(self.a);
-    }
-
-    fn xor(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .zeroPage => 3,
-            .indexedZeroPageX => 4,
-            .absolute => 4,
-            .indexedAbsoluteX => 4, // TODO: +1 if page crossed
-            .indexedAbsoluteY => 4, // TODO: +1 if page crossed
-            .indexedIndirect => 6,
-            .indirectIndexed => 5, // TODO: +1 if page crossed
-            else => unreachable,
-        };
-
-        self.a ^= m;
-
-        self.set_nz_flags(self.a);
-    }
-
-    inline fn eval_operand_value(self: *CPU, op: AddrMode) u8 {
-        return switch (op) {
-            .accumulator => self.a,
-            .absolute, .zeroPage => |k| self.read_bus(k),
-            .immediate => |k| k,
-            .indirect => |k| a: {
-                if (k & 0xff00 == 0xff) { // Simulate page boundary hardware bug
-                    const lsb: u16 = @intCast(self.read_bus(k + 0));
-                    const msb: u16 = @intCast(self.read_bus(k & 0xff00));
-                    const vv = ((msb << 8) | lsb);
-                    break :a self.read_bus(vv);
-                } else { // Behave normally
-                    const lsb: u16 = @intCast(self.read_bus(k + 0));
-                    const msb: u16 = @intCast(self.read_bus(k + 1));
-                    const vv = ((msb << 8) | lsb);
-                    break :a self.read_bus(vv);
-                }
-            },
-            .indirectIndexed => |k| a: {
-                const zp: u8 = @truncate(k);
-                const lsb: u16 = @intCast(self.read_bus(zp));
-                const msb: u16 = @intCast(self.read_bus(zp +% 1));
-                const vv = ((msb << 8) | lsb);
-                break :a self.read_bus(vv +% @as(u16, self.y));
-            },
-            .indexedIndirect => |k| a: {
-                const zp: u8 = @truncate(k);
-                const kk = zp +% self.x;
-                const lsb: u16 = @intCast(self.read_bus(kk));
-                const msb: u16 = @intCast(self.read_bus(kk +% 1));
-                const vv = ((msb << 8) | lsb);
-                break :a self.read_bus(vv);
-            },
-            .indexedZeroPageX => |k| self.read_bus(self.x +% k),
-            .indexedZeroPageY => |k| self.read_bus(self.y +% k),
-            .indexedAbsoluteX => |k| self.read_bus(@as(u16, self.x) +% k),
-            .indexedAbsoluteY => |k| self.read_bus(@as(u16, self.y) +% k),
-            else => {
-                std.debug.print("{}", .{op});
-                unreachable;
-            },
-        };
-    }
-
-    fn lda(self: *CPU, dst: AddrMode) void {
-        self.a = self.eval_operand_value(dst);
-
-        self.cycles += switch (dst) {
-            .immediate => 2,
-            .absolute, .indexedAbsoluteX, .indexedAbsoluteY => 4,
-            .zeroPage => 3,
-            .indexedZeroPageX => 4,
-            .indirectIndexed => 5,
-            .indexedIndirect => 6,
-            else => unreachable,
-        };
-
-        self.set_nz_flags(self.a);
-    }
-
-    fn sta(self: *CPU, dst: AddrMode) void {
-        self.write_operand_value(dst, self.a);
-
-        self.cycles += switch (dst) {
-            .indexedAbsoluteX, .indexedAbsoluteY, .absolute => 3,
-            .indexedIndirect, .indirectIndexed, .zeroPage, .indexedZeroPageX => 2,
-            else => unreachable,
-        };
-
-        // No flags affected
-    }
-
-    fn stx(self: *CPU, dst: AddrMode) void {
-        self.write_operand_value(dst, self.x);
-
-        self.cycles += switch (dst) {
-            .absolute => 4,
-            .indexedZeroPageY => 4,
-            .zeroPage => 3,
-            else => unreachable,
-        };
-
-        // No flags affected
-    }
-
-    fn sty(self: *CPU, dst: AddrMode) void {
-        self.write_operand_value(dst, self.y);
-
-        self.cycles += switch (dst) {
-            .absolute => 4,
-            .indexedZeroPageX => 4,
-            .zeroPage => 3,
-            else => unreachable,
-        };
-
-        // No flags affected
-    }
-
-    inline fn branch(self: *CPU, dst: anytype, cond: bool) void {
-        const addr: i8 = switch (dst) {
-            .relative => |v| v,
-            else => unreachable,
-        };
-
-        if (cond) {
-            if (addr >= 0) {
-                self.pc += @abs(addr);
-            } else {
-                self.pc -= @abs(addr);
-            }
-            self.cycles += 1; // TODO: +2 if to a new page
-        }
-
-        self.cycles += switch (dst) {
-            .relative => 2,
-            else => unreachable,
-        };
-
-        // No flags affected
-    }
-
-    fn bne(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, !self.p.zero);
-    }
-
-    fn beq(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, self.p.zero);
-    }
-
-    fn bpl(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, !self.p.negative);
-    }
-
-    fn bmi(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, self.p.negative);
-    }
-
-    fn bcc(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, !self.p.carry);
-    }
-
-    fn bcs(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, self.p.carry);
-    }
-
-    fn bvc(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, !self.p.overflow);
-    }
-
-    fn bvs(self: *CPU, dst: AddrMode) void {
-        self.branch(dst, self.p.overflow);
-    }
-
-    fn iny(self: *CPU) void {
-        self.y +%= 1;
-        self.cycles += 2;
-
-        self.set_nz_flags(self.y);
-    }
-
-    fn inx(self: *CPU) void {
-        self.x +%= 1;
-        self.cycles += 2;
-
-        self.set_nz_flags(self.x);
-    }
-
-    fn inc(self: *CPU, dst: AddrMode) void {
-        var m = self.eval_operand_value(dst);
-
-        m +%= 1;
-
-        self.write_operand_value(dst, m);
-
-        self.cycles += switch (dst) {
-            .zeroPage => 5,
-            .indexedZeroPageX, .absolute => 6,
-            .indexedAbsoluteX => 7,
-            else => unreachable,
-        };
-
-        self.set_nz_flags(m);
-    }
-
-    fn dec(self: *CPU, dst: AddrMode) void {
-        var m = self.eval_operand_value(dst);
-
-        m -%= 1;
-
-        self.write_operand_value(dst, m);
-
-        self.cycles += switch (dst) {
-            .zeroPage => 5,
-            .indexedZeroPageX, .absolute => 6,
-            .indexedAbsoluteX => 7,
-            else => unreachable,
-        };
-
-        self.set_nz_flags(m);
-    }
-
-    fn dey(self: *CPU) void {
-        self.y -%= 1;
-        self.cycles += 2;
-
-        self.set_nz_flags(self.y);
-    }
-
-    fn dex(self: *CPU) void {
-        self.x -%= 1;
-        self.cycles += 2;
-
-        self.set_nz_flags(self.x);
-    }
-
-    inline fn read_bus(self: *CPU, k: u16) u8 {
+    inline fn read(self: *CPU, k: u16) u8 {
         return self.bus.?.read(k);
     }
 
-    inline fn write_bus(self: *CPU, k: u16, v: u8) void {
+    inline fn write(self: *CPU, k: u16, v: u8) void {
         self.bus.?.write(k, v);
     }
 
-    inline fn write_operand_value(self: *CPU, dst: AddrMode, val: u8) void {
-        switch (dst) {
-            .accumulator => self.a = val,
-            .absolute, .zeroPage => |k| self.write_bus(k, val),
-            .indirectIndexed => |k| a: {
-                const zp: u8 = @truncate(k);
-                const lsb: u16 = @intCast(self.read_bus(zp));
-                const msb: u16 = @intCast(self.read_bus(zp +% 1));
-                const vv = ((msb << 8) | lsb);
-                break :a self.write_bus(vv +% @as(u16, self.y), val);
+    pub fn clock(self: *CPU) void {
+        self.total_cycles += 1;
+        // NMI edge detection: rising edge of nmi_line latches nmi_pending
+        if (self.nmi_line and !self.nmi_prev) {
+            self.nmi_pending = true;
+        }
+        self.nmi_prev = self.nmi_line;
+
+        if (self.step == 0) {
+            // Instruction boundary — check for pending interrupts
+            if (self.nmi_pending) {
+                self.nmi_pending = false;
+                self.interrupt_pending = .nmi;
+                _ = self.read(self.pc);
+                self.opcode = 0;
+                self.step = 1;
+                return;
+            } else if (self.irq_line and !self.p.interrupt_disable) {
+                self.interrupt_pending = .irq;
+                _ = self.read(self.pc);
+                self.opcode = 0;
+                self.step = 1;
+                return;
+            } else {
+                // Fetch opcode
+                self.opcode = self.read(self.pc);
+
+                if (self.debug) |writer| {
+                    cpu_debug.debug_print(self, writer, self.pc, self.opcode) catch unreachable;
+                }
+
+                self.pc +%= 1;
+                self.step = 1;
+                return;
+            }
+        }
+
+        // Execute one step of the current instruction
+        if (self.interrupt_pending != .none) {
+            self.exec_interrupt();
+        } else {
+            const handler = opcode_table[self.opcode];
+            handler(self);
+        }
+    }
+
+    fn exec_interrupt(self: *CPU) void {
+        // Interrupt sequence: 7 cycles total
+        // step 1: dummy read (already done at step 0)
+        // step 2: push PCH
+        // step 3: push PCL
+        // step 4: push P
+        // step 5: read vector low
+        // step 6: read vector high → done
+        switch (self.step) {
+            1 => {
+                // Second dummy read
+                _ = self.read(self.pc);
+                self.step = 2;
             },
-            .indexedIndirect => |k| a: {
-                const zp: u8 = @truncate(k);
-                const kk = zp +% self.x;
-                const lsb: u16 = @intCast(self.read_bus(kk));
-                const msb: u16 = @intCast(self.read_bus(kk +% 1));
-                const vv = ((msb << 8) | lsb);
-                break :a self.write_bus(vv, val);
+            2 => {
+                self.write(0x0100 | @as(u16, self.sp), @truncate(self.pc >> 8));
+                self.sp -%= 1;
+                self.step = 3;
             },
-            .indexedZeroPageX => |k| self.write_bus(self.x +% k, val),
-            .indexedZeroPageY => |k| self.write_bus(self.y +% k, val),
-            .indexedAbsoluteX => |k| self.write_bus(@as(u16, self.x) +% k, val),
-            .indexedAbsoluteY => |k| self.write_bus(@as(u16, self.y) +% k, val),
+            3 => {
+                self.write(0x0100 | @as(u16, self.sp), @truncate(self.pc));
+                self.sp -%= 1;
+                self.step = 4;
+            },
+            4 => {
+                var flags = self.p;
+                flags.break_command = false;
+                flags._padding = 1;
+                self.write(0x0100 | @as(u16, self.sp), @bitCast(flags));
+                self.sp -%= 1;
+                self.p.interrupt_disable = true;
+                self.step = 5;
+            },
+            5 => {
+                const vector: u16 = if (self.interrupt_pending == .nmi) 0xFFFA else 0xFFFE;
+                self.addr = self.read(vector);
+                self.step = 6;
+            },
+            6 => {
+                const vector: u16 = if (self.interrupt_pending == .nmi) 0xFFFA else 0xFFFE;
+                self.pc = (@as(u16, self.read(vector + 1)) << 8) | (self.addr & 0xFF);
+                self.interrupt_pending = .none;
+                self.step = 0;
+            },
             else => unreachable,
         }
     }
 
-    fn lsr(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
+    // ─── Operations ─────────────────────────────────────────────────────────
 
-        const bit0 = 0b1 & m;
-        const res = m / 2;
-
-        self.write_operand_value(dst, res);
-
-        self.cycles += switch (dst) {
-            .accumulator => 2,
-            .zeroPage => 5,
-            .indexedZeroPageX => 6,
-            .absolute => 6,
-            .indexedAbsoluteX => 7,
-            else => unreachable,
-        };
-
-        self.set_cnz_flags(res, bit0 == 1);
-    }
-
-    fn asl(self: *CPU, dst: AddrMode) void {
-        const m: u16 = @intCast(self.eval_operand_value(dst));
-
-        const res = m << 1;
-
-        self.p.carry = (res & 0xff00) > 0;
-        self.p.zero = (res & 0xff) == 0;
-        self.p.negative = (res & 0x80) != 0;
-
-        self.write_operand_value(dst, @truncate(res));
-
-        self.cycles += switch (dst) {
-            .accumulator => 2,
-            .zeroPage => 5,
-            .indexedZeroPageX => 6,
-            .absolute => 6,
-            .indexedAbsoluteX => 7,
-            else => unreachable,
-        };
-    }
-
-    fn ror(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        const bit0 = m & 0b1;
-
-        const carry_num: u8 = if (self.p.carry) 0x80 else 0;
-
-        const res = (m >> 1) | carry_num;
-
-        self.write_operand_value(dst, res);
-
-        self.cycles += switch (dst) {
-            .accumulator => 2,
-            .zeroPage => 5,
-            .indexedZeroPageX => 6,
-            .absolute => 6,
-            .indexedAbsoluteX => 7,
-            else => unreachable,
-        };
-
-        self.set_cnz_flags(res, bit0 != 0);
-    }
-
-    fn rol(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        const bit7 = m & 0x80;
-
-        const carry_num: u8 = if (self.p.carry) 1 else 0;
-
-        const res = (m << 1) | carry_num;
-
-        self.write_operand_value(dst, res);
-
-        self.cycles += switch (dst) {
-            .accumulator => 2,
-            .zeroPage => 5,
-            .indexedZeroPageX => 6,
-            .absolute => 6,
-            .indexedAbsoluteX => 7,
-            else => unreachable,
-        };
-
-        self.set_cnz_flags(res, bit7 != 0);
-    }
-
-    fn bit(self: *CPU, dst: AddrMode) void {
-        const m = self.eval_operand_value(dst);
-
-        const res = self.a & m;
-
-        self.cycles += switch (dst) {
-            .zeroPage => 2,
-            .absolute => 3,
-            else => unreachable,
-        };
-
-        self.p.zero = res == 0;
-        self.p.overflow = (m & (1 << 6)) != 0;
-        self.p.negative = (m & (1 << 7)) != 0;
-    }
-
-    inline fn push(self: *CPU, v: u8) void {
-        self.bus.?.write(0x0100 | @as(u16, self.sp), v);
-        self.sp -= 1;
-    }
-
-    inline fn push16(self: *CPU, v: u16) void {
-        const msb = @as(u8, @truncate(v >> 8));
-        const lsb = @as(u8, @truncate(v));
-        self.push(msb);
-        self.push(lsb);
-    }
-
-    fn pha(self: *CPU) void {
-        self.push(self.a);
-        self.cycles += 3;
-    }
-
-    fn php(self: *CPU) void {
-        var a = self.p;
-        a.break_command = true;
-        a._padding = 1;
-        self.push(@as(u8, @bitCast(a)));
-        self.cycles += 3;
-    }
-
-    inline fn pop(self: *CPU) u8 {
-        self.sp += 1;
-        const v = self.bus.?.read(0x0100 | @as(u16, self.sp));
-
-        return v;
-    }
-
-    inline fn pop16(self: *CPU) u16 {
-        const lsb = self.pop();
-        const msb = self.pop();
-        return @as(u16, msb) << 8 | @as(u16, lsb);
-    }
-
-    fn pla(self: *CPU) void {
-        self.a = self.pop();
-        self.cycles += 4;
+    fn op_lda(self: *CPU, val: u8) void {
+        self.a = val;
         self.set_nz_flags(self.a);
     }
-
-    fn plp(self: *CPU) void {
-        self.p = @bitCast(self.pop());
-        self.p.break_command = false;
-        self.p._padding = 1;
-        self.cycles += 4;
-    }
-
-    fn txs(self: *CPU) void {
-        self.sp = self.x;
-        self.cycles += 2;
-        // No flags affected
-    }
-
-    fn tsx(self: *CPU) void {
-        self.x = self.sp;
-        self.cycles += 2;
-
+    fn op_ldx(self: *CPU, val: u8) void {
+        self.x = val;
         self.set_nz_flags(self.x);
     }
-
-    fn tya(self: *CPU) void {
-        self.a = self.y;
-        self.cycles += 2;
-
-        self.set_nz_flags(self.a);
-    }
-
-    fn tay(self: *CPU) void {
-        self.y = self.a;
-        self.cycles += 2;
-
+    fn op_ldy(self: *CPU, val: u8) void {
+        self.y = val;
         self.set_nz_flags(self.y);
     }
-
-    fn tax(self: *CPU) void {
-        self.x = self.a;
-        self.cycles += 2;
-
-        self.set_nz_flags(self.x);
+    fn op_adc(self: *CPU, val: u8) void {
+        self.add_with_carry(val);
     }
-
-    fn txa(self: *CPU) void {
-        self.a = self.x;
-        self.cycles += 2;
-
+    fn op_sbc(self: *CPU, val: u8) void {
+        self.add_with_carry(val ^ 0xff);
+    }
+    fn op_and(self: *CPU, val: u8) void {
+        self.a &= val;
         self.set_nz_flags(self.a);
     }
-
-    fn nop(self: *CPU) void {
-        self.cycles += 2;
+    fn op_ora(self: *CPU, val: u8) void {
+        self.a |= val;
+        self.set_nz_flags(self.a);
+    }
+    fn op_eor(self: *CPU, val: u8) void {
+        self.a ^= val;
+        self.set_nz_flags(self.a);
+    }
+    fn op_cmp(self: *CPU, val: u8) void {
+        self.p.carry = self.a >= val;
+        self.set_nz_flags(self.a -% val);
+    }
+    fn op_cpx(self: *CPU, val: u8) void {
+        self.p.carry = self.x >= val;
+        self.set_nz_flags(self.x -% val);
+    }
+    fn op_cpy(self: *CPU, val: u8) void {
+        self.p.carry = self.y >= val;
+        self.set_nz_flags(self.y -% val);
+    }
+    fn op_bit(self: *CPU, val: u8) void {
+        self.p.zero = (self.a & val) == 0;
+        self.p.overflow = (val & (1 << 6)) != 0;
+        self.p.negative = (val & (1 << 7)) != 0;
     }
 
-    fn clc(self: *CPU) void {
+    // RMW operations: take old value, return new value
+    fn op_asl(self: *CPU, val: u8) u8 {
+        self.p.carry = (val & 0x80) != 0;
+        const res = val << 1;
+        self.set_nz_flags(res);
+        return res;
+    }
+    fn op_lsr(self: *CPU, val: u8) u8 {
+        self.p.carry = (val & 0x01) != 0;
+        const res = val >> 1;
+        self.set_nz_flags(res);
+        return res;
+    }
+    fn op_rol(self: *CPU, val: u8) u8 {
+        const carry_in: u8 = if (self.p.carry) 1 else 0;
+        self.p.carry = (val & 0x80) != 0;
+        const res = (val << 1) | carry_in;
+        self.set_nz_flags(res);
+        return res;
+    }
+    fn op_ror(self: *CPU, val: u8) u8 {
+        const carry_in: u8 = if (self.p.carry) 0x80 else 0;
+        self.p.carry = (val & 0x01) != 0;
+        const res = (val >> 1) | carry_in;
+        self.set_nz_flags(res);
+        return res;
+    }
+    fn op_inc(_: *CPU, val: u8) u8 {
+        return val +% 1;
+    }
+    fn op_dec(_: *CPU, val: u8) u8 {
+        return val -% 1;
+    }
+
+    // ─── Addressing mode templates ──────────────────────────────────────────
+
+    // Immediate: 2 cycles
+    // step 1: read operand, execute, done
+    fn immediate(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        const val = self.read(self.pc);
+                        self.pc +%= 1;
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page Read: 3 cycles
+    fn zp_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        const val = self.read(self.addr & 0xFF);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page Write: 3 cycles
+    fn zp_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.write(self.addr & 0xFF, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page RMW: 5 cycles
+    fn zp_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.data = self.read(self.addr & 0xFF);
+                        self.step = 3;
+                    },
+                    3 => {
+                        // Dummy write of old value
+                        self.write(self.addr & 0xFF, self.data);
+                        self.data = op(self, self.data);
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.write(self.addr & 0xFF, self.data);
+                        self.set_nz_flags(self.data);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page,X Read: 4 cycles
+    fn zpx_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        // Dummy read at unindexed zp addr
+                        _ = self.read(self.ptr);
+                        self.addr = self.ptr +% self.x;
+                        self.step = 3;
+                    },
+                    3 => {
+                        const val = self.read(self.addr & 0xFF);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page,Y Read: 4 cycles
+    fn zpy_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        _ = self.read(self.ptr);
+                        self.addr = self.ptr +% self.y;
+                        self.step = 3;
+                    },
+                    3 => {
+                        const val = self.read(self.addr & 0xFF);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page,X Write: 4 cycles
+    fn zpx_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        _ = self.read(self.ptr);
+                        self.addr = self.ptr +% self.x;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.write(self.addr & 0xFF, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page,Y Write: 4 cycles
+    fn zpy_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        _ = self.read(self.ptr);
+                        self.addr = self.ptr +% self.y;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.write(self.addr & 0xFF, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Zero Page,X RMW: 6 cycles
+    fn zpx_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        _ = self.read(self.ptr);
+                        self.addr = self.ptr +% self.x;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.data = self.read(self.addr & 0xFF);
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.write(self.addr & 0xFF, self.data);
+                        self.data = op(self, self.data);
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.write(self.addr & 0xFF, self.data);
+                        self.set_nz_flags(self.data);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute Read: 4 cycles
+    fn abs_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.addr |= @as(u16, self.read(self.pc)) << 8;
+                        self.pc +%= 1;
+                        self.step = 3;
+                    },
+                    3 => {
+                        const val = self.read(self.addr);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute Write: 4 cycles
+    fn abs_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.addr |= @as(u16, self.read(self.pc)) << 8;
+                        self.pc +%= 1;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.write(self.addr, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute RMW: 6 cycles
+    fn abs_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.addr |= @as(u16, self.read(self.pc)) << 8;
+                        self.pc +%= 1;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.data = self.read(self.addr);
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.write(self.addr, self.data);
+                        self.data = op(self, self.data);
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.write(self.addr, self.data);
+                        self.set_nz_flags(self.data);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute,X Read: 4-5 cycles (page cross penalty)
+    fn abx_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.data2 = self.read(self.pc);
+                        self.pc +%= 1;
+                        // Check for page cross
+                        const lo: u8 = @truncate(self.addr);
+                        const sum = @as(u16, lo) + @as(u16, self.x);
+                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
+                        if (sum > 0xFF) {
+                            self.data = 1; // page crossed flag
+                        } else {
+                            self.data = 0;
+                        }
+                        self.step = 3;
+                    },
+                    3 => {
+                        if (self.data == 0) {
+                            // No page cross — read and done
+                            const val = self.read(self.addr);
+                            op(self, val);
+                            self.step = 0;
+                        } else {
+                            // Page cross — dummy read at wrong address, fix high byte
+                            _ = self.read(self.addr);
+                            self.addr +%= 0x100;
+                            self.step = 4;
+                        }
+                    },
+                    4 => {
+                        const val = self.read(self.addr);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute,Y Read: 4-5 cycles (page cross penalty)
+    fn aby_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.data2 = self.read(self.pc);
+                        self.pc +%= 1;
+                        const lo: u8 = @truncate(self.addr);
+                        const sum = @as(u16, lo) + @as(u16, self.y);
+                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
+                        if (sum > 0xFF) {
+                            self.data = 1;
+                        } else {
+                            self.data = 0;
+                        }
+                        self.step = 3;
+                    },
+                    3 => {
+                        if (self.data == 0) {
+                            const val = self.read(self.addr);
+                            op(self, val);
+                            self.step = 0;
+                        } else {
+                            _ = self.read(self.addr);
+                            self.addr +%= 0x100;
+                            self.step = 4;
+                        }
+                    },
+                    4 => {
+                        const val = self.read(self.addr);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute,X Write: 5 cycles (always extra cycle)
+    fn abx_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.data2 = self.read(self.pc);
+                        self.pc +%= 1;
+                        const lo: u8 = @truncate(self.addr);
+                        const sum = @as(u16, lo) + @as(u16, self.x);
+                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
+                        if (sum > 0xFF) {
+                            self.data = 1;
+                        } else {
+                            self.data = 0;
+                        }
+                        self.step = 3;
+                    },
+                    3 => {
+                        // Dummy read (always happens for writes)
+                        _ = self.read(self.addr);
+                        if (self.data != 0) {
+                            self.addr +%= 0x100;
+                        }
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.write(self.addr, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute,Y Write: 5 cycles (always extra cycle)
+    fn aby_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.data2 = self.read(self.pc);
+                        self.pc +%= 1;
+                        const lo: u8 = @truncate(self.addr);
+                        const sum = @as(u16, lo) + @as(u16, self.y);
+                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
+                        if (sum > 0xFF) {
+                            self.data = 1;
+                        } else {
+                            self.data = 0;
+                        }
+                        self.step = 3;
+                    },
+                    3 => {
+                        _ = self.read(self.addr);
+                        if (self.data != 0) {
+                            self.addr +%= 0x100;
+                        }
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.write(self.addr, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute,X RMW: 7 cycles
+    fn abx_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.data2 = self.read(self.pc);
+                        self.pc +%= 1;
+                        const lo: u8 = @truncate(self.addr);
+                        const sum = @as(u16, lo) + @as(u16, self.x);
+                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
+                        if (sum > 0xFF) {
+                            self.data = 1;
+                        } else {
+                            self.data = 0;
+                        }
+                        self.step = 3;
+                    },
+                    3 => {
+                        // Dummy read at potentially wrong address
+                        _ = self.read(self.addr);
+                        if (self.data != 0) {
+                            self.addr +%= 0x100;
+                        }
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.data = self.read(self.addr);
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.write(self.addr, self.data);
+                        self.data = op(self, self.data);
+                        self.step = 6;
+                    },
+                    6 => {
+                        self.write(self.addr, self.data);
+                        self.set_nz_flags(self.data);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // (Indirect,X) Read: 6 cycles
+    fn izx_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        // Dummy read, add X
+                        _ = self.read(self.ptr);
+                        self.ptr +%= self.x;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.addr = self.read(self.ptr);
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.addr |= @as(u16, self.read(self.ptr +% 1)) << 8;
+                        self.step = 5;
+                    },
+                    5 => {
+                        const val = self.read(self.addr);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // (Indirect,X) Write: 6 cycles
+    fn izx_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        _ = self.read(self.ptr);
+                        self.ptr +%= self.x;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.addr = self.read(self.ptr);
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.addr |= @as(u16, self.read(self.ptr +% 1)) << 8;
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.write(self.addr, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // (Indirect),Y Read: 5-6 cycles
+    fn izy_read(comptime op: fn (*CPU, u8) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.addr = self.read(self.ptr);
+                        self.step = 3;
+                    },
+                    3 => {
+                        const hi = self.read(self.ptr +% 1);
+                        const lo: u8 = @truncate(self.addr);
+                        const sum = @as(u16, lo) + @as(u16, self.y);
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, @truncate(sum));
+                        if (sum > 0xFF) {
+                            self.data = 1; // page crossed
+                        } else {
+                            self.data = 0;
+                        }
+                        self.step = 4;
+                    },
+                    4 => {
+                        if (self.data == 0) {
+                            const val = self.read(self.addr);
+                            op(self, val);
+                            self.step = 0;
+                        } else {
+                            _ = self.read(self.addr);
+                            self.addr +%= 0x100;
+                            self.step = 5;
+                        }
+                    },
+                    5 => {
+                        const val = self.read(self.addr);
+                        op(self, val);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // (Indirect),Y Write: 6 cycles (always extra cycle)
+    fn izy_write(comptime get_val: fn (*CPU) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.addr = self.read(self.ptr);
+                        self.step = 3;
+                    },
+                    3 => {
+                        const hi = self.read(self.ptr +% 1);
+                        const lo: u8 = @truncate(self.addr);
+                        const sum = @as(u16, lo) + @as(u16, self.y);
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, @truncate(sum));
+                        if (sum > 0xFF) {
+                            self.data = 1;
+                        } else {
+                            self.data = 0;
+                        }
+                        self.step = 4;
+                    },
+                    4 => {
+                        // Dummy read (always for writes)
+                        _ = self.read(self.addr);
+                        if (self.data != 0) {
+                            self.addr +%= 0x100;
+                        }
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.write(self.addr, get_val(self));
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // ─── Implied / Accumulator operations ───────────────────────────────────
+
+    // Implied: 2 cycles
+    fn implied(comptime op: fn (*CPU) void) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        // Dummy read at PC
+                        _ = self.read(self.pc);
+                        op(self);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Accumulator RMW: 2 cycles
+    fn acc_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        _ = self.read(self.pc);
+                        self.a = op(self, self.a);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // ─── Value getters for write operations ─────────────────────────────────
+    fn get_a(self: *CPU) u8 {
+        return self.a;
+    }
+    fn get_x(self: *CPU) u8 {
+        return self.x;
+    }
+    fn get_y(self: *CPU) u8 {
+        return self.y;
+    }
+
+    // ─── Implied operation bodies ───────────────────────────────────────────
+    fn impl_tax(self: *CPU) void {
+        self.x = self.a;
+        self.set_nz_flags(self.x);
+    }
+    fn impl_tay(self: *CPU) void {
+        self.y = self.a;
+        self.set_nz_flags(self.y);
+    }
+    fn impl_txa(self: *CPU) void {
+        self.a = self.x;
+        self.set_nz_flags(self.a);
+    }
+    fn impl_tya(self: *CPU) void {
+        self.a = self.y;
+        self.set_nz_flags(self.a);
+    }
+    fn impl_tsx(self: *CPU) void {
+        self.x = self.sp;
+        self.set_nz_flags(self.x);
+    }
+    fn impl_txs(self: *CPU) void {
+        self.sp = self.x;
+    }
+    fn impl_inx(self: *CPU) void {
+        self.x +%= 1;
+        self.set_nz_flags(self.x);
+    }
+    fn impl_iny(self: *CPU) void {
+        self.y +%= 1;
+        self.set_nz_flags(self.y);
+    }
+    fn impl_dex(self: *CPU) void {
+        self.x -%= 1;
+        self.set_nz_flags(self.x);
+    }
+    fn impl_dey(self: *CPU) void {
+        self.y -%= 1;
+        self.set_nz_flags(self.y);
+    }
+    fn impl_clc(self: *CPU) void {
         self.p.carry = false;
-        self.cycles += 2;
     }
-
-    fn clv(self: *CPU) void {
-        self.p.overflow = false;
-        self.cycles += 2;
-    }
-
-    fn sec(self: *CPU) void {
+    fn impl_sec(self: *CPU) void {
         self.p.carry = true;
-        self.cycles += 2;
     }
-
-    fn sei(self: *CPU) void {
+    fn impl_cli(self: *CPU) void {
+        self.p.interrupt_disable = false;
+    }
+    fn impl_sei(self: *CPU) void {
         self.p.interrupt_disable = true;
-        self.cycles += 2;
     }
-
-    fn cld(self: *CPU) void {
+    fn impl_cld(self: *CPU) void {
         self.p.decimal_mode = false;
-        self.cycles += 2;
     }
-
-    fn sed(self: *CPU) void {
+    fn impl_sed(self: *CPU) void {
         self.p.decimal_mode = true;
-        self.cycles += 2;
     }
-
-    fn mapOp(code: u8) !Op {
-        return switch (code) {
-            // BRK - Force Interrupt
-            // 0x00 => self.brk(),
-            // RTI - Return from Interrupt
-            0x40 => .{ .implied = &rti },
-            // JMP - Jump
-            0x4c => .{ .absolute = &jmp },
-            0x6c => .{ .indirect = &jmp },
-            // JSR - Jump to Subroutine
-            0x20 => .{ .absolute = &jsr }, // },
-            // RTS - Return from Subroutine
-            0x60 => .{ .implied = &rts },
-            // EOR - Exclusive OR
-            0x49 => .{ .immediate = &xor },
-            0x45 => .{ .zeroPage = &xor },
-            0x55 => .{ .indexedZeroPageX = &xor },
-            0x4d => .{ .absolute = &xor },
-            0x5d => .{ .indexedAbsoluteX = &xor },
-            0x59 => .{ .indexedAbsoluteY = &xor },
-            0x41 => .{ .indexedIndirect = &xor },
-            0x51 => .{ .indirectIndexed = &xor },
-            // AND - Logical AND
-            0x29 => .{ .immediate = &cpu_and },
-            0x25 => .{ .zeroPage = &cpu_and },
-            0x35 => .{ .indexedZeroPageX = &cpu_and },
-            0x2d => .{ .absolute = &cpu_and },
-            0x3d => .{ .indexedAbsoluteX = &cpu_and },
-            0x39 => .{ .indexedAbsoluteY = &cpu_and },
-            0x21 => .{ .indexedIndirect = &cpu_and },
-            0x31 => .{ .indirectIndexed = &cpu_and },
-            // ORA - Logical Inclusive OR
-            0x09 => .{ .immediate = &cpu_or },
-            0x05 => .{ .zeroPage = &cpu_or },
-            0x15 => .{ .indexedZeroPageX = &cpu_or },
-            0x0d => .{ .absolute = &cpu_or },
-            0x1d => .{ .indexedAbsoluteX = &cpu_or },
-            0x19 => .{ .indexedAbsoluteY = &cpu_or },
-            0x01 => .{ .indexedIndirect = &cpu_or },
-            0x11 => .{ .indirectIndexed = &cpu_or },
-            // ADC - Add with Carry
-            0x69 => .{ .immediate = &adc },
-            0x65 => .{ .zeroPage = &adc },
-            0x75 => .{ .indexedZeroPageX = &adc },
-            0x6d => .{ .absolute = &adc },
-            0x7d => .{ .indexedAbsoluteX = &adc },
-            0x79 => .{ .indexedAbsoluteY = &adc },
-            0x71 => .{ .indirectIndexed = &adc },
-            0x61 => .{ .indexedIndirect = &adc },
-            // SBC - Add with Carry
-            0xe9 => .{ .immediate = &sbc },
-            0xe5 => .{ .zeroPage = &sbc },
-            0xf5 => .{ .indexedZeroPageX = &sbc },
-            0xed => .{ .absolute = &sbc },
-            0xfd => .{ .indexedAbsoluteX = &sbc },
-            0xf9 => .{ .indexedAbsoluteY = &sbc },
-            0xe1 => .{ .indexedIndirect = &sbc },
-            0xf1 => .{ .indirectIndexed = &sbc },
-            // TAY - Transfer Accumulator to Y
-            0xa8 => .{ .implied = &tay },
-            // TYA - Transfer Y to Accumulator
-            0x98 => .{ .implied = &tya },
-            // TXS - Transfer X to Stack Pointer
-            0x9a => .{ .implied = &txs },
-            // TSX - Transfer Stack Pointer to X
-            0xba => .{ .implied = &tsx },
-            // TAX - Transfer Accumulator to X
-            0xaa => .{ .implied = &tax },
-            // TXA - Transfer X to Accumulator
-            0x8a => .{ .implied = &txa },
-            // BPL - Branch if Positive
-            0x10 => .{ .relative = &bpl },
-            // BNE - Branch if Not Equal
-            0xd0 => .{ .relative = &bne },
-            // BEQ - Branch if Equal
-            0xf0 => .{ .relative = &beq },
-            // BCC - Branch if Carry Clear
-            0x90 => .{ .relative = &bcc },
-            // BCS - Branch if Carry Set
-            0xb0 => .{ .relative = &bcs },
-            // BVC - Branch if Overflow Clear
-            0x50 => .{ .relative = &bvc },
-            // BVS - Branch if Overflow Set
-            0x70 => .{ .relative = &bvs },
-            // BMI - Branch if Minus
-            0x30 => .{ .relative = &bmi },
-            // STA - Store Accumulator
-            0x85 => .{ .zeroPage = &sta },
-            0x95 => .{ .indexedZeroPageX = &sta },
-            0x8d => .{ .absolute = &sta },
-            0x9d => .{ .indexedAbsoluteX = &sta },
-            0x99 => .{ .indexedAbsoluteY = &sta },
-            0x81 => .{ .indexedIndirect = &sta },
-            0x91 => .{ .indirectIndexed = &sta },
-            // STX - Store X Register
-            0x86 => .{ .zeroPage = &stx },
-            0x96 => .{ .indexedZeroPageY = &stx },
-            0x8e => .{ .absolute = &stx },
-            // STY - Store Y Register
-            0x84 => .{ .zeroPage = &sty },
-            0x94 => .{ .indexedZeroPageX = &sty },
-            0x8c => .{ .absolute = &sty },
-            // CMP - Compare
-            0xc9 => .{ .immediate = &cmp },
-            0xc5 => .{ .zeroPage = &cmp },
-            0xd5 => .{ .indexedZeroPageX = &cmp },
-            0xcd => .{ .absolute = &cmp },
-            0xdd => .{ .indexedAbsoluteX = &cmp },
-            0xd9 => .{ .indexedAbsoluteY = &cmp },
-            0xc1 => .{ .indexedIndirect = &cmp },
-            0xd1 => .{ .indirectIndexed = &cmp },
-            // CPX - Compare X Register
-            0xe0 => .{ .immediate = &cpx },
-            0xe4 => .{ .zeroPage = &cpx },
-            0xec => .{ .absolute = &cpx },
-            // CPY - Compare Y Register
-            0xc0 => .{ .immediate = &cpy },
-            0xc4 => .{ .zeroPage = &cpy },
-            0xcc => .{ .absolute = &cpy },
-            // LDA - Load Accumulator
-            0xa9 => .{ .immediate = &lda },
-            0xad => .{ .absolute = &lda },
-            0xbd => .{ .indexedAbsoluteX = &lda },
-            0xb9 => .{ .indexedAbsoluteY = &lda },
-            0xa5 => .{ .zeroPage = &lda },
-            0xb5 => .{ .indexedZeroPageX = &lda },
-            0xa1 => .{ .indexedIndirect = &lda },
-            0xb1 => .{ .indirectIndexed = &lda },
-            // LDX - Load X Register
-            0xa2 => .{ .immediate = &ldx },
-            0xa6 => .{ .zeroPage = &ldx },
-            0xb6 => .{ .indexedZeroPageY = &ldx },
-            0xae => .{ .absolute = &ldx },
-            0xbe => .{ .indexedAbsoluteY = &ldx },
-            // LDY - Load Y Register
-            0xa0 => .{ .immediate = &ldy },
-            0xa4 => .{ .zeroPage = &ldy },
-            0xb4 => .{ .indexedZeroPageX = &ldy },
-            0xac => .{ .absolute = &ldy },
-            0xbc => .{ .indexedAbsoluteX = &ldy },
-            // INC - Increment Memory
-            0xe6 => .{ .zeroPage = &inc },
-            0xf6 => .{ .indexedZeroPageX = &inc },
-            0xee => .{ .absolute = &inc },
-            0xfe => .{ .indexedAbsoluteX = &inc },
-            // INX - Increment X Register
-            0xe8 => .{ .implied = &inx },
-            // INY - Increment Y Register
-            0xc8 => .{ .implied = &iny },
-            // DEC - Decrement Memory
-            0xc6 => .{ .zeroPage = &dec },
-            0xd6 => .{ .indexedZeroPageX = &dec },
-            0xce => .{ .absolute = &dec },
-            0xde => .{ .indexedAbsoluteX = &dec },
-            // DEY - Decrement Y Register
-            0x88 => .{ .implied = &dey },
-            // DEX - Decrement X Register
-            0xca => .{ .implied = &dex },
-            // PHA - Push Accumulator
-            0x48 => .{ .implied = &pha },
-            // PHP - Push Processor Status
-            0x08 => .{ .implied = &php },
-            // PLA - Pull Accumulator
-            0x68 => .{ .implied = &pla },
-            // PLP - Pull Processor Status
-            0x28 => .{ .implied = &plp },
-            // BIT - Bit Test
-            0x24 => .{ .zeroPage = &bit },
-            0x2c => .{ .absolute = &bit },
-            // LSR - Logical Shift Right
-            0x4a => .{ .accumulator = &lsr },
-            0x46 => .{ .zeroPage = &lsr },
-            0x56 => .{ .indexedZeroPageX = &lsr },
-            0x4e => .{ .absolute = &lsr },
-            0x5e => .{ .indexedAbsoluteX = &lsr },
-            // ASL - Arithmetic Shift Left
-            0x0a => .{ .accumulator = &asl },
-            0x06 => .{ .zeroPage = &asl },
-            0x16 => .{ .indexedZeroPageX = &asl },
-            0x0e => .{ .absolute = &asl },
-            0x1e => .{ .indexedAbsoluteX = &asl },
-            // ROR - Rotate Right
-            0x6a => .{ .accumulator = &ror },
-            0x66 => .{ .zeroPage = &ror },
-            0x76 => .{ .indexedZeroPageX = &ror },
-            0x6e => .{ .absolute = &ror },
-            0x7e => .{ .indexedAbsoluteX = &ror },
-            // ROL - Rotate Left
-            0x2a => .{ .accumulator = &rol },
-            0x26 => .{ .zeroPage = &rol },
-            0x36 => .{ .indexedZeroPageX = &rol },
-            0x2e => .{ .absolute = &rol },
-            0x3e => .{ .indexedAbsoluteX = &rol },
-            // NOP - No Operation
-            0xc2, 0x1a, 0x3a, 0x5a, 0x7a, 0xea => .{ .implied = &nop },
-            // CLC - Clear Carry Flag
-            0x18 => .{ .implied = &clc },
-            // CLV - Clear Overflow Flag
-            0xb8 => .{ .implied = &clv },
-            // SEC - Set Carry Flag
-            0x38 => .{ .implied = &sec },
-            // SEI - Set Interrupt Disable
-            0x78 => .{ .implied = &sei },
-            // CLD - Clear Decimal Mode
-            0xd8 => .{ .implied = &cld },
-            // SED - Set Decimal Flag
-            0xf8 => .{ .implied = &sed },
-            else => CPUError.unmappedCode,
-        };
+    fn impl_clv(self: *CPU) void {
+        self.p.overflow = false;
     }
+    fn impl_nop(_: *CPU) void {}
 
-    fn step(self: *CPU) void {
-        const instr_pos = self.pc;
-        const instr = self.bus.?.read(instr_pos);
-        self.pc += 1;
+    // ─── Special instructions (manually stepped) ────────────────────────────
 
-        const op: Op = mapOp(instr) catch {
-            const name = cpu_debug.debug_op_code(instr);
-            const nameWithDetails = name[1];
-            std.debug.print("Op code not implemented: {s} 0x{x:0>2} at: {x}\n", .{ nameWithDetails, instr, instr_pos });
-            unreachable;
-        };
-
-        const curr_operand: AddrMode = switch (op) {
-            .implied => .{ .implied = {} },
-            .accumulator => .{ .accumulator = {} },
-            .zeroPage => operand(self, .zeroPage),
-            .indexedZeroPageX => operand(self, .indexedZeroPageX),
-            .indexedZeroPageY => operand(self, .indexedZeroPageY),
-            .absolute => operand(self, .absolute),
-            .indirect => operand(self, .indirect),
-            .indexedAbsoluteX => operand(self, .indexedAbsoluteX),
-            .indexedAbsoluteY => operand(self, .indexedAbsoluteY),
-            .indirectIndexed => operand(self, .indirectIndexed),
-            .indexedIndirect => operand(self, .indexedIndirect),
-            .immediate => operand(self, .immediate),
-            .relative => operand(self, .relative),
-        };
-
-        if (self.debug) |writer| {
-            cpu_debug.debug_print(self, writer, curr_operand, instr_pos, instr) catch unreachable;
-        }
-
-        switch (op) {
-            .implied => |func| func(self),
-            .accumulator => |func| func(self, curr_operand),
-            .zeroPage => |func| func(self, curr_operand),
-            .indexedZeroPageX => |func| func(self, curr_operand),
-            .indexedZeroPageY => |func| func(self, curr_operand),
-            .absolute => |func| func(self, curr_operand),
-            .indirect => |func| func(self, curr_operand),
-            .indexedAbsoluteX => |func| func(self, curr_operand),
-            .indexedAbsoluteY => |func| func(self, curr_operand),
-            .indirectIndexed => |func| func(self, curr_operand),
-            .indexedIndirect => |func| func(self, curr_operand),
-            .immediate => |func| func(self, curr_operand),
-            .relative => |func| func(self, curr_operand),
+    fn exec_brk(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                // Read and discard next byte, increment PC
+                _ = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                self.write(0x0100 | @as(u16, self.sp), @truncate(self.pc >> 8));
+                self.sp -%= 1;
+                self.step = 3;
+            },
+            3 => {
+                self.write(0x0100 | @as(u16, self.sp), @truncate(self.pc));
+                self.sp -%= 1;
+                self.step = 4;
+            },
+            4 => {
+                var flags = self.p;
+                flags.break_command = true;
+                flags._padding = 1;
+                self.write(0x0100 | @as(u16, self.sp), @bitCast(flags));
+                self.sp -%= 1;
+                self.p.interrupt_disable = true;
+                self.step = 5;
+            },
+            5 => {
+                self.addr = self.read(0xFFFE);
+                self.step = 6;
+            },
+            6 => {
+                self.pc = (@as(u16, self.read(0xFFFF)) << 8) | (self.addr & 0xFF);
+                self.step = 0;
+            },
+            else => unreachable,
         }
     }
 
-    inline fn read_u16_operand(self: *CPU) u16 {
-        const lsb: u16 = self.bus.?.read(self.pc);
-        const msb: u16 = self.bus.?.read(self.pc + 1);
-        self.pc += 2;
-
-        return (msb << 8) | lsb;
+    fn exec_rti(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                // Dummy read
+                _ = self.read(self.pc);
+                self.step = 2;
+            },
+            2 => {
+                // Dummy read from stack (increment SP)
+                self.sp +%= 1;
+                _ = self.read(0x0100 | @as(u16, self.sp));
+                self.step = 3;
+            },
+            3 => {
+                self.p = @bitCast(self.read(0x0100 | @as(u16, self.sp)));
+                self.p.break_command = false;
+                self.p._padding = 1;
+                self.sp +%= 1;
+                self.step = 4;
+            },
+            4 => {
+                self.addr = self.read(0x0100 | @as(u16, self.sp));
+                self.sp +%= 1;
+                self.step = 5;
+            },
+            5 => {
+                self.pc = (@as(u16, self.read(0x0100 | @as(u16, self.sp))) << 8) | (self.addr & 0xFF);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
     }
 
-    inline fn operand(self: *CPU, comptime addrType: anytype) AddrMode {
-        switch (addrType) {
-            .accumulator => {
-                return .{ .accumulator = {} };
+    fn exec_rts(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                // Dummy read
+                _ = self.read(self.pc);
+                self.step = 2;
             },
-            .zeroPage => {
-                const b: u8 = self.bus.?.read(self.pc);
-                self.pc += 1;
-                return .{ .zeroPage = b };
+            2 => {
+                // Dummy read from stack
+                self.sp +%= 1;
+                _ = self.read(0x0100 | @as(u16, self.sp));
+                self.step = 3;
             },
-            .indexedZeroPageX => {
-                const v: u8 = self.bus.?.read(self.pc);
-                self.pc += 1;
-                return .{ .indexedZeroPageX = v };
+            3 => {
+                self.addr = self.read(0x0100 | @as(u16, self.sp));
+                self.sp +%= 1;
+                self.step = 4;
             },
-            .indexedZeroPageY => {
-                const v: u8 = self.bus.?.read(self.pc);
-                self.pc += 1;
-                return .{ .indexedZeroPageY = v };
+            4 => {
+                self.pc = (@as(u16, self.read(0x0100 | @as(u16, self.sp))) << 8) | (self.addr & 0xFF);
+                self.step = 5;
             },
-            .indirect => {
-                const v = self.read_u16_operand();
-                return .{ .indirect = v };
+            5 => {
+                // Increment PC (JSR pushed PC-1)
+                _ = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 0;
             },
-            .absolute => {
-                const v = self.read_u16_operand();
-                return .{ .absolute = v };
-            },
-            .indexedAbsoluteX => {
-                const v = self.read_u16_operand();
-                return .{ .indexedAbsoluteX = v };
-            },
-            .indexedAbsoluteY => {
-                const v = self.read_u16_operand();
-                return .{ .indexedAbsoluteY = v };
-            },
-            .indirectIndexed => {
-                const v = self.bus.?.read(self.pc);
-                self.pc += 1;
-
-                return .{ .indirectIndexed = v };
-            },
-            .indexedIndirect => {
-                const v = self.bus.?.read(self.pc);
-                self.pc += 1;
-
-                return .{ .indexedIndirect = v };
-            },
-            .immediate => {
-                const b: u8 = self.bus.?.read(self.pc);
-                self.pc += 1;
-                return .{ .immediate = b };
-            },
-            .relative => {
-                const b: i8 = @as(i8, @bitCast(self.bus.?.read(self.pc)));
-                self.pc += 1;
-                return .{ .relative = b };
-            },
-            else => {
-                @compileLog("No implementation for {s}", .{addrType});
-                unreachable;
-            },
+            else => unreachable,
         }
+    }
+
+    fn exec_jsr(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                // "Internal operation" — dummy read from stack
+                _ = self.read(0x0100 | @as(u16, self.sp));
+                self.step = 3;
+            },
+            3 => {
+                self.write(0x0100 | @as(u16, self.sp), @truncate(self.pc >> 8));
+                self.sp -%= 1;
+                self.step = 4;
+            },
+            4 => {
+                self.write(0x0100 | @as(u16, self.sp), @truncate(self.pc));
+                self.sp -%= 1;
+                self.step = 5;
+            },
+            5 => {
+                self.pc = (@as(u16, self.read(self.pc)) << 8) | (self.addr & 0xFF);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn exec_jmp_abs(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                self.pc = (@as(u16, self.read(self.pc)) << 8) | (self.addr & 0xFF);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn exec_jmp_ind(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                self.addr |= @as(u16, self.read(self.pc)) << 8;
+                self.pc +%= 1;
+                self.step = 3;
+            },
+            3 => {
+                self.data = self.read(self.addr);
+                self.step = 4;
+            },
+            4 => {
+                // 6502 page boundary bug
+                const hi_addr = if (self.addr & 0x00FF == 0x00FF)
+                    self.addr & 0xFF00
+                else
+                    self.addr + 1;
+                self.pc = (@as(u16, self.read(hi_addr)) << 8) | @as(u16, self.data);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn exec_pha(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                // Dummy read
+                _ = self.read(self.pc);
+                self.step = 2;
+            },
+            2 => {
+                self.write(0x0100 | @as(u16, self.sp), self.a);
+                self.sp -%= 1;
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn exec_php(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                _ = self.read(self.pc);
+                self.step = 2;
+            },
+            2 => {
+                var flags = self.p;
+                flags.break_command = true;
+                flags._padding = 1;
+                self.write(0x0100 | @as(u16, self.sp), @bitCast(flags));
+                self.sp -%= 1;
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn exec_pla(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                // Dummy read
+                _ = self.read(self.pc);
+                self.step = 2;
+            },
+            2 => {
+                // Increment SP
+                self.sp +%= 1;
+                _ = self.read(0x0100 | @as(u16, self.sp));
+                self.step = 3;
+            },
+            3 => {
+                self.a = self.read(0x0100 | @as(u16, self.sp));
+                self.set_nz_flags(self.a);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    fn exec_plp(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                _ = self.read(self.pc);
+                self.step = 2;
+            },
+            2 => {
+                self.sp +%= 1;
+                _ = self.read(0x0100 | @as(u16, self.sp));
+                self.step = 3;
+            },
+            3 => {
+                self.p = @bitCast(self.read(0x0100 | @as(u16, self.sp)));
+                self.p.break_command = false;
+                self.p._padding = 1;
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // Branch: 2-4 cycles
+    fn branch(comptime cond: fn (*CPU) bool) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.data = self.read(self.pc);
+                        self.pc +%= 1;
+                        if (!cond(self)) {
+                            self.step = 0; // Not taken: 2 cycles total
+                        } else {
+                            self.step = 2;
+                        }
+                    },
+                    2 => {
+                        // Dummy read at current PC
+                        _ = self.read(self.pc);
+                        const offset: i8 = @bitCast(self.data);
+                        const old_pc = self.pc;
+                        if (offset >= 0) {
+                            self.pc +%= @abs(offset);
+                        } else {
+                            self.pc -%= @abs(offset);
+                        }
+                        // Check page cross
+                        if ((old_pc ^ self.pc) & 0xFF00 != 0) {
+                            self.step = 3; // Page crossed: 4 cycles
+                        } else {
+                            self.step = 0; // No page cross: 3 cycles
+                        }
+                    },
+                    3 => {
+                        // Dummy read for page cross fixup
+                        _ = self.read(self.pc);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    fn cond_bcc(self: *CPU) bool {
+        return !self.p.carry;
+    }
+    fn cond_bcs(self: *CPU) bool {
+        return self.p.carry;
+    }
+    fn cond_beq(self: *CPU) bool {
+        return self.p.zero;
+    }
+    fn cond_bne(self: *CPU) bool {
+        return !self.p.zero;
+    }
+    fn cond_bmi(self: *CPU) bool {
+        return self.p.negative;
+    }
+    fn cond_bpl(self: *CPU) bool {
+        return !self.p.negative;
+    }
+    fn cond_bvs(self: *CPU) bool {
+        return self.p.overflow;
+    }
+    fn cond_bvc(self: *CPU) bool {
+        return !self.p.overflow;
+    }
+
+    // NOP immediate (DOP): 2 cycles - reads and discards a byte
+    fn exec_nop_imm(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                _ = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // NOP zero page (DOP z): 3 cycles
+    fn exec_nop_zp(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                _ = self.read(self.addr & 0xFF);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // NOP zpx (DOP z,X): 4 cycles
+    fn exec_nop_zpx(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.ptr = @truncate(self.read(self.pc));
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                _ = self.read(self.ptr);
+                self.addr = self.ptr +% self.x;
+                self.step = 3;
+            },
+            3 => {
+                _ = self.read(self.addr & 0xFF);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // NOP absolute (TOP abs): 4 cycles
+    fn exec_nop_abs(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                self.addr |= @as(u16, self.read(self.pc)) << 8;
+                self.pc +%= 1;
+                self.step = 3;
+            },
+            3 => {
+                _ = self.read(self.addr);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // NOP abs,X (TOP abs,X): 4-5 cycles (page cross)
+    fn exec_nop_abx(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                self.data2 = self.read(self.pc);
+                self.pc +%= 1;
+                const lo: u8 = @truncate(self.addr);
+                const sum = @as(u16, lo) + @as(u16, self.x);
+                self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
+                if (sum > 0xFF) {
+                    self.data = 1;
+                } else {
+                    self.data = 0;
+                }
+                self.step = 3;
+            },
+            3 => {
+                if (self.data == 0) {
+                    _ = self.read(self.addr);
+                    self.step = 0;
+                } else {
+                    _ = self.read(self.addr);
+                    self.addr +%= 0x100;
+                    self.step = 4;
+                }
+            },
+            4 => {
+                _ = self.read(self.addr);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // Unofficial opcode: NOP implied but reads next byte (0xC2 etc.)
+    // Actually 0xC2 is DOP #n (2-byte NOP)
+    fn exec_unofficial_nop(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                _ = self.read(self.pc);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // ─── Opcode dispatch table ──────────────────────────────────────────────
+
+    const opcode_table: [256]*const fn (*CPU) void = init_opcode_table();
+
+    fn init_opcode_table() [256]*const fn (*CPU) void {
+        var table: [256]*const fn (*CPU) void = undefined;
+        // Initialize all to unimplemented
+        for (0..256) |i| {
+            table[i] = &exec_unimplemented;
+        }
+
+        // BRK
+        table[0x00] = &exec_brk;
+
+        // ORA
+        table[0x09] = &immediate(op_ora);
+        table[0x05] = &zp_read(op_ora);
+        table[0x15] = &zpx_read(op_ora);
+        table[0x0d] = &abs_read(op_ora);
+        table[0x1d] = &abx_read(op_ora);
+        table[0x19] = &aby_read(op_ora);
+        table[0x01] = &izx_read(op_ora);
+        table[0x11] = &izy_read(op_ora);
+
+        // AND
+        table[0x29] = &immediate(op_and);
+        table[0x25] = &zp_read(op_and);
+        table[0x35] = &zpx_read(op_and);
+        table[0x2d] = &abs_read(op_and);
+        table[0x3d] = &abx_read(op_and);
+        table[0x39] = &aby_read(op_and);
+        table[0x21] = &izx_read(op_and);
+        table[0x31] = &izy_read(op_and);
+
+        // EOR
+        table[0x49] = &immediate(op_eor);
+        table[0x45] = &zp_read(op_eor);
+        table[0x55] = &zpx_read(op_eor);
+        table[0x4d] = &abs_read(op_eor);
+        table[0x5d] = &abx_read(op_eor);
+        table[0x59] = &aby_read(op_eor);
+        table[0x41] = &izx_read(op_eor);
+        table[0x51] = &izy_read(op_eor);
+
+        // ADC
+        table[0x69] = &immediate(op_adc);
+        table[0x65] = &zp_read(op_adc);
+        table[0x75] = &zpx_read(op_adc);
+        table[0x6d] = &abs_read(op_adc);
+        table[0x7d] = &abx_read(op_adc);
+        table[0x79] = &aby_read(op_adc);
+        table[0x61] = &izx_read(op_adc);
+        table[0x71] = &izy_read(op_adc);
+
+        // SBC
+        table[0xe9] = &immediate(op_sbc);
+        table[0xe5] = &zp_read(op_sbc);
+        table[0xf5] = &zpx_read(op_sbc);
+        table[0xed] = &abs_read(op_sbc);
+        table[0xfd] = &abx_read(op_sbc);
+        table[0xf9] = &aby_read(op_sbc);
+        table[0xe1] = &izx_read(op_sbc);
+        table[0xf1] = &izy_read(op_sbc);
+        table[0xeb] = &immediate(op_sbc); // Unofficial SBC #n
+
+        // CMP
+        table[0xc9] = &immediate(op_cmp);
+        table[0xc5] = &zp_read(op_cmp);
+        table[0xd5] = &zpx_read(op_cmp);
+        table[0xcd] = &abs_read(op_cmp);
+        table[0xdd] = &abx_read(op_cmp);
+        table[0xd9] = &aby_read(op_cmp);
+        table[0xc1] = &izx_read(op_cmp);
+        table[0xd1] = &izy_read(op_cmp);
+
+        // CPX
+        table[0xe0] = &immediate(op_cpx);
+        table[0xe4] = &zp_read(op_cpx);
+        table[0xec] = &abs_read(op_cpx);
+
+        // CPY
+        table[0xc0] = &immediate(op_cpy);
+        table[0xc4] = &zp_read(op_cpy);
+        table[0xcc] = &abs_read(op_cpy);
+
+        // BIT
+        table[0x24] = &zp_read(op_bit);
+        table[0x2c] = &abs_read(op_bit);
+
+        // LDA
+        table[0xa9] = &immediate(op_lda);
+        table[0xa5] = &zp_read(op_lda);
+        table[0xb5] = &zpx_read(op_lda);
+        table[0xad] = &abs_read(op_lda);
+        table[0xbd] = &abx_read(op_lda);
+        table[0xb9] = &aby_read(op_lda);
+        table[0xa1] = &izx_read(op_lda);
+        table[0xb1] = &izy_read(op_lda);
+
+        // LDX
+        table[0xa2] = &immediate(op_ldx);
+        table[0xa6] = &zp_read(op_ldx);
+        table[0xb6] = &zpy_read(op_ldx);
+        table[0xae] = &abs_read(op_ldx);
+        table[0xbe] = &aby_read(op_ldx);
+
+        // LDY
+        table[0xa0] = &immediate(op_ldy);
+        table[0xa4] = &zp_read(op_ldy);
+        table[0xb4] = &zpx_read(op_ldy);
+        table[0xac] = &abs_read(op_ldy);
+        table[0xbc] = &abx_read(op_ldy);
+
+        // STA
+        table[0x85] = &zp_write(get_a);
+        table[0x95] = &zpx_write(get_a);
+        table[0x8d] = &abs_write(get_a);
+        table[0x9d] = &abx_write(get_a);
+        table[0x99] = &aby_write(get_a);
+        table[0x81] = &izx_write(get_a);
+        table[0x91] = &izy_write(get_a);
+
+        // STX
+        table[0x86] = &zp_write(get_x);
+        table[0x96] = &zpy_write(get_x);
+        table[0x8e] = &abs_write(get_x);
+
+        // STY
+        table[0x84] = &zp_write(get_y);
+        table[0x94] = &zpx_write(get_y);
+        table[0x8c] = &abs_write(get_y);
+
+        // ASL
+        table[0x0a] = &acc_rmw(op_asl);
+        table[0x06] = &zp_rmw(op_asl);
+        table[0x16] = &zpx_rmw(op_asl);
+        table[0x0e] = &abs_rmw(op_asl);
+        table[0x1e] = &abx_rmw(op_asl);
+
+        // LSR
+        table[0x4a] = &acc_rmw(op_lsr);
+        table[0x46] = &zp_rmw(op_lsr);
+        table[0x56] = &zpx_rmw(op_lsr);
+        table[0x4e] = &abs_rmw(op_lsr);
+        table[0x5e] = &abx_rmw(op_lsr);
+
+        // ROL
+        table[0x2a] = &acc_rmw(op_rol);
+        table[0x26] = &zp_rmw(op_rol);
+        table[0x36] = &zpx_rmw(op_rol);
+        table[0x2e] = &abs_rmw(op_rol);
+        table[0x3e] = &abx_rmw(op_rol);
+
+        // ROR
+        table[0x6a] = &acc_rmw(op_ror);
+        table[0x66] = &zp_rmw(op_ror);
+        table[0x76] = &zpx_rmw(op_ror);
+        table[0x6e] = &abs_rmw(op_ror);
+        table[0x7e] = &abx_rmw(op_ror);
+
+        // INC
+        table[0xe6] = &zp_rmw(op_inc);
+        table[0xf6] = &zpx_rmw(op_inc);
+        table[0xee] = &abs_rmw(op_inc);
+        table[0xfe] = &abx_rmw(op_inc);
+
+        // DEC
+        table[0xc6] = &zp_rmw(op_dec);
+        table[0xd6] = &zpx_rmw(op_dec);
+        table[0xce] = &abs_rmw(op_dec);
+        table[0xde] = &abx_rmw(op_dec);
+
+        // Implied register ops
+        table[0xaa] = &implied(impl_tax);
+        table[0xa8] = &implied(impl_tay);
+        table[0x8a] = &implied(impl_txa);
+        table[0x98] = &implied(impl_tya);
+        table[0xba] = &implied(impl_tsx);
+        table[0x9a] = &implied(impl_txs);
+        table[0xe8] = &implied(impl_inx);
+        table[0xc8] = &implied(impl_iny);
+        table[0xca] = &implied(impl_dex);
+        table[0x88] = &implied(impl_dey);
+        table[0x18] = &implied(impl_clc);
+        table[0x38] = &implied(impl_sec);
+        table[0x58] = &implied(impl_cli);
+        table[0x78] = &implied(impl_sei);
+        table[0xd8] = &implied(impl_cld);
+        table[0xf8] = &implied(impl_sed);
+        table[0xb8] = &implied(impl_clv);
+        table[0xea] = &implied(impl_nop);
+
+        // NOP variants (unofficial)
+        table[0x1a] = &implied(impl_nop);
+        table[0x3a] = &implied(impl_nop);
+        table[0x5a] = &implied(impl_nop);
+        table[0x7a] = &implied(impl_nop);
+        table[0xda] = &implied(impl_nop);
+        table[0xfa] = &implied(impl_nop);
+
+        // DOP (double NOP) - immediate
+        table[0x80] = &exec_nop_imm;
+        table[0x82] = &exec_nop_imm;
+        table[0x89] = &exec_nop_imm;
+        table[0xc2] = &exec_nop_imm;
+        table[0xe2] = &exec_nop_imm;
+
+        // DOP zero page
+        table[0x04] = &exec_nop_zp;
+        table[0x44] = &exec_nop_zp;
+        table[0x64] = &exec_nop_zp;
+
+        // DOP zero page,X
+        table[0x14] = &exec_nop_zpx;
+        table[0x34] = &exec_nop_zpx;
+        table[0x54] = &exec_nop_zpx;
+        table[0x74] = &exec_nop_zpx;
+        table[0xd4] = &exec_nop_zpx;
+        table[0xf4] = &exec_nop_zpx;
+
+        // TOP absolute
+        table[0x0c] = &exec_nop_abs;
+
+        // TOP absolute,X
+        table[0x1c] = &exec_nop_abx;
+        table[0x3c] = &exec_nop_abx;
+        table[0x5c] = &exec_nop_abx;
+        table[0x7c] = &exec_nop_abx;
+        table[0xdc] = &exec_nop_abx;
+        table[0xfc] = &exec_nop_abx;
+
+        // Branches
+        table[0x10] = &branch(cond_bpl);
+        table[0x30] = &branch(cond_bmi);
+        table[0x50] = &branch(cond_bvc);
+        table[0x70] = &branch(cond_bvs);
+        table[0x90] = &branch(cond_bcc);
+        table[0xb0] = &branch(cond_bcs);
+        table[0xd0] = &branch(cond_bne);
+        table[0xf0] = &branch(cond_beq);
+
+        // Stack
+        table[0x48] = &exec_pha;
+        table[0x08] = &exec_php;
+        table[0x68] = &exec_pla;
+        table[0x28] = &exec_plp;
+
+        // Jumps & Returns
+        table[0x4c] = &exec_jmp_abs;
+        table[0x6c] = &exec_jmp_ind;
+        table[0x20] = &exec_jsr;
+        table[0x60] = &exec_rts;
+        table[0x40] = &exec_rti;
+
+        return table;
+    }
+
+    fn exec_unimplemented(self: *CPU) void {
+        const info = cpu_debug.debug_op_code(self.opcode);
+        std.debug.print("Unimplemented opcode: {s} 0x{x:0>2} at PC=0x{x:0>4}\n", .{ info[1], self.opcode, self.pc -% 1 });
+        unreachable;
     }
 };
 
@@ -1194,7 +1820,6 @@ test "6502_functional_test" {
     var loaded_rom = try rom.Rom.load_unchecked(&buffer);
     var nes: Bus = Bus.init();
     nes.cpu.bus = &nes;
-    nes.cpu.debug = std.io.getStdOut().writer();
 
     nes.load_rom(&loaded_rom);
 
@@ -1203,9 +1828,18 @@ test "6502_functional_test" {
     nes.cpu.pc = 0x0400;
 
     var pc: u16 = 0;
-    while (nes.cpu.pc != pc) {
-        pc = nes.cpu.pc;
+    var stuck_count: u32 = 0;
+    while (stuck_count < 100) {
         nes.clock();
+        // Only check for stuck at instruction boundaries
+        if (nes.cpu.step == 0) {
+            if (nes.cpu.pc == pc) {
+                stuck_count += 1;
+            } else {
+                stuck_count = 0;
+                pc = nes.cpu.pc;
+            }
+        }
     }
 
     try std.testing.expectEqual(0x3399, nes.cpu.pc);
@@ -1220,7 +1854,6 @@ test "nestest" {
 
     var loaded_rom = try rom.Rom.load(&buffer);
     var nes: Bus = Bus.init();
-    nes.cpu.debug = std.io.getStdOut().writer();
     nes.cpu.bus = &nes;
 
     nes.load_rom(&loaded_rom);

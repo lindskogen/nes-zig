@@ -67,6 +67,7 @@ pub fn main() !void {
             nes2.clock();
             if (nes2.ppu.frame_complete) {
                 frames += 1;
+                nes2.ppu.trace_writes = false;
                 while (nes2.ppu.frame_complete) {
                     nes2.clock();
                 }
@@ -88,6 +89,7 @@ pub fn main() !void {
             }
         }
         std.debug.print("Screenshot saved to framebuffer.ppm ({d} frames)\n", .{frames});
+
         return;
     }
 

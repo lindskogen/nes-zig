@@ -1,11 +1,7 @@
 const std = @import("std");
 
-const cpuMod = @import("cpu.zig");
+const CPU = @import("cpu.zig").CPU;
 const Rom = @import("rom.zig");
-const AddrMode = @import("addr.zig").AddrMode;
-
-const CPU = cpuMod.CPU;
-const Op = cpuMod.Op;
 
 pub fn debug_op_code(code: u8) struct { []const u8, []const u8, u8 } {
     return switch (code) {
@@ -268,15 +264,83 @@ pub fn debug_op_code(code: u8) struct { []const u8, []const u8, u8 } {
     };
 }
 
+/// Addressing mode categories for debug display
+const AddrModeType = enum {
+    implied,
+    accumulator,
+    immediate,
+    zero_page,
+    zero_page_x,
+    zero_page_y,
+    absolute,
+    absolute_x,
+    absolute_y,
+    indirect,
+    indexed_indirect,
+    indirect_indexed,
+    relative,
+};
+
+fn get_addr_mode(opcode: u8) AddrModeType {
+    return switch (opcode) {
+        // Implied
+        0x00, 0x08, 0x18, 0x28, 0x38, 0x40, 0x48, 0x58, 0x60, 0x68, 0x78, 0x88, 0x8A, 0x98, 0x9A, 0xA8, 0xAA, 0xB8, 0xBA, 0xC8, 0xCA, 0xD8, 0xE8, 0xEA, 0xF8 => .implied,
+        0x1A, 0x3A, 0x5A, 0x7A, 0xDA, 0xFA => .implied,
+
+        // Accumulator
+        0x0A, 0x2A, 0x4A, 0x6A => .accumulator,
+
+        // Immediate
+        0x09, 0x29, 0x49, 0x69, 0xA0, 0xA2, 0xA9, 0xC0, 0xC9, 0xE0, 0xE9 => .immediate,
+        0x80, 0x82, 0x89, 0xC2, 0xE2, 0xEB => .immediate,
+
+        // Relative (branches)
+        0x10, 0x30, 0x50, 0x70, 0x90, 0xB0, 0xD0, 0xF0 => .relative,
+
+        // Zero page
+        0x05, 0x06, 0x24, 0x25, 0x26, 0x45, 0x46, 0x65, 0x66, 0x84, 0x85, 0x86, 0xA4, 0xA5, 0xA6, 0xC4, 0xC5, 0xC6, 0xE4, 0xE5, 0xE6 => .zero_page,
+        0x04, 0x44, 0x64 => .zero_page,
+
+        // Zero page,X
+        0x15, 0x16, 0x35, 0x36, 0x55, 0x56, 0x75, 0x76, 0x94, 0x95, 0xB4, 0xB5, 0xD5, 0xD6, 0xF5, 0xF6 => .zero_page_x,
+        0x14, 0x34, 0x54, 0x74, 0xD4, 0xF4 => .zero_page_x,
+
+        // Zero page,Y
+        0x96, 0xB6 => .zero_page_y,
+
+        // Absolute
+        0x0D, 0x0E, 0x20, 0x2C, 0x2D, 0x2E, 0x4C, 0x4D, 0x4E, 0x6D, 0x6E, 0x8C, 0x8D, 0x8E, 0xAC, 0xAD, 0xAE, 0xCC, 0xCD, 0xCE, 0xEC, 0xED, 0xEE => .absolute,
+        0x0C => .absolute,
+
+        // Absolute,X
+        0x1D, 0x1E, 0x3D, 0x3E, 0x5D, 0x5E, 0x7D, 0x7E, 0x9D, 0xBC, 0xBD, 0xDD, 0xDE, 0xFD, 0xFE => .absolute_x,
+        0x1C, 0x3C, 0x5C, 0x7C, 0xDC, 0xFC => .absolute_x,
+
+        // Absolute,Y
+        0x19, 0x39, 0x59, 0x79, 0x99, 0xB9, 0xBE, 0xD9, 0xF9 => .absolute_y,
+
+        // Indirect
+        0x6C => .indirect,
+
+        // (Indirect,X)
+        0x01, 0x21, 0x41, 0x61, 0x81, 0xA1, 0xC1, 0xE1 => .indexed_indirect,
+
+        // (Indirect),Y
+        0x11, 0x31, 0x51, 0x71, 0x91, 0xB1, 0xD1, 0xF1 => .indirect_indexed,
+
+        else => .implied,
+    };
+}
+
 inline fn add_i8(a: u16, b: i8) u16 {
     return if (b >= 0) a + @abs(b) else a - @abs(b);
 }
 
-pub fn disassemble(rom: *Rom.Rom, writer: std.fs.File.Writer) !void {
+pub fn disassemble(rom_data: *Rom.Rom, writer: std.fs.File.Writer) !void {
     var instr_pos: usize = 0;
 
-    while (instr_pos < rom.buffer.len) : (instr_pos += 1) {
-        const instr = rom.buffer[instr_pos];
+    while (instr_pos < rom_data.buffer.len) : (instr_pos += 1) {
+        const instr = rom_data.buffer[instr_pos];
 
         const info = debug_op_code(instr);
         const name = info[1];
@@ -286,7 +350,7 @@ pub fn disassemble(rom: *Rom.Rom, writer: std.fs.File.Writer) !void {
 
         for (0..3) |offset| {
             if (offset < bytes) {
-                try writer.print("{X:0>2} ", .{rom.buffer[instr_pos + @as(u16, @intCast(offset))]});
+                try writer.print("{X:0>2} ", .{rom_data.buffer[instr_pos + @as(u16, @intCast(offset))]});
             } else {
                 try writer.print("   ", .{});
             }
@@ -297,7 +361,8 @@ pub fn disassemble(rom: *Rom.Rom, writer: std.fs.File.Writer) !void {
     }
 }
 
-pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, instr_pos: u16, instr: u8) !void {
+/// Debug print at instruction boundary. Peeks operand bytes directly from bus.
+pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, instr_pos: u16, instr: u8) !void {
     const info = debug_op_code(instr);
     const name = info[0];
     const bytes = info[2];
@@ -306,7 +371,7 @@ pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, ins
 
     for (0..3) |offset| {
         if (offset < bytes) {
-            try writer.print("{X:0>2} ", .{cpu.bus.?.read(instr_pos + @as(u16, @intCast(offset)))});
+            try writer.print("{X:0>2} ", .{cpu.bus.?.read(instr_pos +% @as(u16, @intCast(offset)))});
         } else {
             try writer.print("   ", .{});
         }
@@ -314,27 +379,71 @@ pub fn debug_print(cpu: *CPU, writer: std.fs.File.Writer, operand: AddrMode, ins
 
     try writer.print(" {s}", .{name});
 
-    try switch (operand) {
-        .implied => writer.print("{s:<28}", .{""}),
-        .accumulator => writer.print("{s:<28}", .{""}),
-        .zeroPage => |o| writer.print(" ${X:0>2}{s:<24}", .{ o, "" }),
-        .indexedZeroPageX => |o| writer.print(" X,${X:0>2}{s:<22}", .{ o, "" }),
-        .indexedZeroPageY => |o| writer.print(" Y,${X:0>2}{s:<22}", .{ o, "" }),
-        .absolute => |o| writer.print(" ${X:0>4}{s:<22}", .{ o, "" }),
-        .indexedAbsoluteX => |o| writer.print(" X,${X:0>4}{s:<20}", .{ o, "" }),
-        .indexedAbsoluteY => |o| writer.print(" Y,${X:0>4}{s:<20}", .{ o, "" }),
-        .indirectIndexed => |o| writer.print(" (${X:0>2}),Y{s:<20}", .{ o, "" }),
-        .immediate => |o| writer.print(" #${X:0>2}{s:<23}", .{ o, "" }),
-        .relative => |o| writer.print(" ${X:0>4}{s:<22}", .{ add_i8(cpu.pc, o), "" }),
-        .indirect => |o| writer.print(" #${X:0>4}{s:<22}", .{ o, "" }),
-        .indexedIndirect => |o| writer.print(" (${X:0>2},X) @ {X:0>2}{s:<22}", .{ o, o + cpu.x, "" }),
-    };
+    const mode = get_addr_mode(instr);
+    switch (mode) {
+        .implied => try writer.print("{s:<28}", .{""}),
+        .accumulator => try writer.print("{s:<28}", .{""}),
+        .immediate => {
+            const operand = cpu.bus.?.read(instr_pos +% 1);
+            try writer.print(" #${X:0>2}{s:<23}", .{ operand, "" });
+        },
+        .zero_page => {
+            const operand = cpu.bus.?.read(instr_pos +% 1);
+            try writer.print(" ${X:0>2}{s:<24}", .{ operand, "" });
+        },
+        .zero_page_x => {
+            const operand = cpu.bus.?.read(instr_pos +% 1);
+            try writer.print(" X,${X:0>2}{s:<22}", .{ operand, "" });
+        },
+        .zero_page_y => {
+            const operand = cpu.bus.?.read(instr_pos +% 1);
+            try writer.print(" Y,${X:0>2}{s:<22}", .{ operand, "" });
+        },
+        .absolute => {
+            const lo: u16 = cpu.bus.?.read(instr_pos +% 1);
+            const hi: u16 = cpu.bus.?.read(instr_pos +% 2);
+            const addr = (hi << 8) | lo;
+            try writer.print(" ${X:0>4}{s:<22}", .{ addr, "" });
+        },
+        .absolute_x => {
+            const lo: u16 = cpu.bus.?.read(instr_pos +% 1);
+            const hi: u16 = cpu.bus.?.read(instr_pos +% 2);
+            const addr = (hi << 8) | lo;
+            try writer.print(" X,${X:0>4}{s:<20}", .{ addr, "" });
+        },
+        .absolute_y => {
+            const lo: u16 = cpu.bus.?.read(instr_pos +% 1);
+            const hi: u16 = cpu.bus.?.read(instr_pos +% 2);
+            const addr = (hi << 8) | lo;
+            try writer.print(" Y,${X:0>4}{s:<20}", .{ addr, "" });
+        },
+        .indirect => {
+            const lo: u16 = cpu.bus.?.read(instr_pos +% 1);
+            const hi: u16 = cpu.bus.?.read(instr_pos +% 2);
+            const addr = (hi << 8) | lo;
+            try writer.print(" #${X:0>4}{s:<22}", .{ addr, "" });
+        },
+        .indexed_indirect => {
+            const operand = cpu.bus.?.read(instr_pos +% 1);
+            try writer.print(" (${X:0>2},X) @ {X:0>2}{s:<22}", .{ operand, operand +% cpu.x, "" });
+        },
+        .indirect_indexed => {
+            const operand = cpu.bus.?.read(instr_pos +% 1);
+            try writer.print(" (${X:0>2}),Y{s:<20}", .{ operand, "" });
+        },
+        .relative => {
+            const offset: i8 = @bitCast(cpu.bus.?.read(instr_pos +% 1));
+            const target = add_i8(instr_pos +% 2, offset);
+            try writer.print(" ${X:0>4}{s:<22}", .{ target, "" });
+        },
+    }
 
-    try writer.print(" A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2}\n", .{
+    try writer.print(" A:{X:0>2} X:{X:0>2} Y:{X:0>2} P:{X:0>2} SP:{X:0>2} CYC:{d}\n", .{
         cpu.a,
         cpu.x,
         cpu.y,
         @as(u8, @bitCast(cpu.p)),
         cpu.sp,
+        cpu.total_cycles,
     });
 }

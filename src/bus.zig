@@ -21,8 +21,34 @@ pub const Bus = struct {
     controllers: [2]u8,
     controllers_cache: [2]u8,
 
+    // OAM DMA state
+    dma_active: bool,
+    dma_page: u8,
+    dma_byte: u16,
+    dma_data: u8,
+    dma_dummy: bool,
+
+    // DMC cycle steal state
+    dmc_stall: u8,
+
     pub fn init() Bus {
-        return Bus{ .rom = null, .ram = undefined, .prg_ram = std.mem.zeroes([8192]u8), .cpu = CPU.init(), .ppu = PPU.init(), .apu = APU.init(), .cycles = 0, .controllers = undefined, .controllers_cache = undefined };
+        return Bus{
+            .rom = null,
+            .ram = std.mem.zeroes([2048]u8),
+            .prg_ram = std.mem.zeroes([8192]u8),
+            .cpu = CPU.init(),
+            .ppu = PPU.init(),
+            .apu = APU.init(),
+            .cycles = 0,
+            .controllers = .{ 0, 0 },
+            .controllers_cache = .{ 0, 0 },
+            .dma_active = false,
+            .dma_page = 0,
+            .dma_byte = 0,
+            .dma_data = 0,
+            .dma_dummy = true,
+            .dmc_stall = 0,
+        };
     }
 
     pub fn load_rom(self: *Bus, rom: *Rom) void {
@@ -42,12 +68,11 @@ pub const Bus = struct {
         } else if (k >= 0x4000 and k <= 0x4013) {
             self.apu.cpu_write(k, v);
         } else if (k == 0x4014) {
-            // OAM DMA - copy 256 bytes from CPU memory to OAM
-            const base: u16 = @as(u16, v) << 8;
-            for (0..256) |i| {
-                self.ppu.oam[i] = self.read(base + @as(u16, @intCast(i)));
-            }
-            // DMA takes 513/514 CPU cycles, but we'll ignore timing for now
+            // OAM DMA — trigger DMA transfer
+            self.dma_active = true;
+            self.dma_page = v;
+            self.dma_byte = 0;
+            self.dma_dummy = true;
         } else if (k == 0x4015) {
             self.apu.cpu_write(k, v);
         } else if (k == 0x4016) {
@@ -91,32 +116,71 @@ pub const Bus = struct {
     pub fn reset(self: *Bus) void {
         self.cpu.reset();
         self.cycles = 0;
+        self.dma_active = false;
+        self.dmc_stall = 0;
     }
 
     pub fn clock(self: *Bus) void {
         self.ppu.clock();
 
         if (self.cycles % 3 == 0) {
-            self.cpu.clock();
-            self.apu.clock();
+            // Wire interrupt lines BEFORE CPU clock for proper edge detection
+            self.cpu.nmi_line = self.ppu.nmi_output;
+            self.cpu.irq_line = self.apu.irq_pending;
+
+            if (self.dma_active) {
+                self.clock_dma();
+            } else if (self.dmc_stall > 0) {
+                self.clock_dmc_stall();
+            } else {
+                self.cpu.clock();
+                self.apu.clock();
+            }
 
             // Service DMC read requests
-            if (self.apu.dmc_read_pending) {
-                self.apu.dmc_read_pending = false;
-                const data = self.read(self.apu.dmc_read_addr);
-                self.apu.dmc.fill_sample_buffer(data);
+            if (self.apu.dmc_read_pending and self.dmc_stall == 0) {
+                self.dmc_stall = 4;
             }
         }
 
-        if (self.ppu.nmi) {
-            self.ppu.nmi = false;
-            self.cpu.nmi();
-        }
-
-        if (self.apu.irq_pending) {
-            self.cpu.irq();
-        }
-
         self.cycles += 1;
+    }
+
+    fn clock_dma(self: *Bus) void {
+        if (self.dma_dummy) {
+            // Alignment cycle — wait for even CPU cycle
+            if (self.cycles % 6 == 0) {
+                // Odd CPU cycle: extra dummy
+            } else {
+                self.dma_dummy = false;
+            }
+        } else {
+            const cpu_cycle = self.cycles / 3;
+            if (cpu_cycle % 2 == 0) {
+                // Read cycle (even)
+                self.dma_data = self.read((@as(u16, self.dma_page) << 8) | @as(u16, @truncate(self.dma_byte)));
+            } else {
+                // Write cycle (odd)
+                self.ppu.oam[self.dma_byte] = self.dma_data;
+                self.dma_byte += 1;
+                if (self.dma_byte == 256) {
+                    self.dma_active = false;
+                }
+            }
+        }
+        // APU still clocks during DMA
+        self.apu.clock();
+    }
+
+    fn clock_dmc_stall(self: *Bus) void {
+        self.dmc_stall -= 1;
+        if (self.dmc_stall == 0) {
+            // Perform the DMC read on the last stall cycle
+            self.apu.dmc_read_pending = false;
+            const data = self.read(self.apu.dmc_read_addr);
+            self.apu.dmc.fill_sample_buffer(data);
+        }
+        // APU still clocks during DMC stall
+        self.apu.clock();
     }
 };
