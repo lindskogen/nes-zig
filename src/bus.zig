@@ -6,10 +6,12 @@ const PPU = @import("ppu.zig").PPU;
 pub const Bus = struct {
     cpu: CPU,
 
-    rom: ?*const Rom,
+    rom: ?*Rom,
 
     /// CPU ram
     ram: [2048]u8,
+    /// PRG RAM ($6000-$7FFF)
+    prg_ram: [8192]u8,
     ppu: PPU,
 
     cycles: u32,
@@ -18,10 +20,10 @@ pub const Bus = struct {
     controllers_cache: [2]u8,
 
     pub fn init() Bus {
-        return Bus{ .rom = null, .ram = undefined, .cpu = CPU.init(), .ppu = PPU.init(), .cycles = 0, .controllers = undefined, .controllers_cache = undefined };
+        return Bus{ .rom = null, .ram = undefined, .prg_ram = std.mem.zeroes([8192]u8), .cpu = CPU.init(), .ppu = PPU.init(), .cycles = 0, .controllers = undefined, .controllers_cache = undefined };
     }
 
-    pub fn load_rom(self: *Bus, rom: *const Rom) void {
+    pub fn load_rom(self: *Bus, rom: *Rom) void {
         self.rom = rom;
         self.ppu.load_rom(rom);
     }
@@ -48,6 +50,8 @@ pub const Bus = struct {
             // APU status
         } else if (k >= 0x4016 and k <= 0x4017) {
             self.controllers_cache[k & 0x0001] = self.controllers[k & 0x0001];
+        } else if (k >= 0x6000 and k <= 0x7FFF) {
+            self.prg_ram[k - 0x6000] = v;
         } else {
             std.debug.print("Unmapped write bus {x}", .{k});
             unreachable;
@@ -68,6 +72,8 @@ pub const Bus = struct {
             const r = (self.controllers_cache[k & 0x0001] & 0x80) > 0;
             self.controllers_cache[k & 0x0001] <<= 1;
             return if (r) 1 else 0;
+        } else if (k >= 0x6000 and k <= 0x7FFF) {
+            return self.prg_ram[k - 0x6000];
         }
 
         std.debug.print("Unmapped read bus {x}", .{k});

@@ -1191,7 +1191,7 @@ test "6502_functional_test" {
 
     std.mem.copyForwards(u8, &buffer, file);
 
-    const loaded_rom = try rom.Rom.load_unchecked(&buffer);
+    var loaded_rom = try rom.Rom.load_unchecked(&buffer);
     var nes: Bus = Bus.init();
     nes.cpu.bus = &nes;
     nes.cpu.debug = std.io.getStdOut().writer();
@@ -1218,7 +1218,7 @@ test "nestest" {
 
     std.mem.copyForwards(u8, &buffer, file);
 
-    const loaded_rom = try rom.Rom.load(&buffer);
+    var loaded_rom = try rom.Rom.load(&buffer);
     var nes: Bus = Bus.init();
     nes.cpu.debug = std.io.getStdOut().writer();
     nes.cpu.bus = &nes;

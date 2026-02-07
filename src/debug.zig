@@ -272,7 +272,7 @@ inline fn add_i8(a: u16, b: i8) u16 {
     return if (b >= 0) a + @abs(b) else a - @abs(b);
 }
 
-pub fn disassemble(rom: *const Rom.Rom, writer: std.fs.File.Writer) !void {
+pub fn disassemble(rom: *Rom.Rom, writer: std.fs.File.Writer) !void {
     var instr_pos: usize = 0;
 
     while (instr_pos < rom.buffer.len) : (instr_pos += 1) {

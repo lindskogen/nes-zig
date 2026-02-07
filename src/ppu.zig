@@ -1,5 +1,7 @@
 const std = @import("std");
-const Rom = @import("rom.zig").Rom;
+const rom_mod = @import("rom.zig");
+const Rom = rom_mod.Rom;
+const MirrorMode = rom_mod.MirrorMode;
 
 const PPUStatus = packed struct(u8) {
     /// Returns stale PPU bus contents.
@@ -60,11 +62,19 @@ pub const PPU = struct {
     ctrl: PPUCtrl,
     mask: PPUMask,
     status: PPUStatus,
-    rom: ?*const Rom,
+    rom: ?*Rom,
 
-    addr: u16,
-    scroll_x: u8,
-    scroll_y: u8,
+    /// Loopy v register - current VRAM address / scroll position (15 bits used)
+    /// Layout: 0yyy NNYY YYYX XXXX
+    ///   X: coarse X scroll (5 bits)
+    ///   Y: coarse Y scroll (5 bits)
+    ///   N: nametable select (2 bits)
+    ///   y: fine Y scroll (3 bits)
+    v: u16,
+    /// Loopy t register - temporary VRAM address (15 bits used)
+    t: u16,
+    /// Fine X scroll (3 bits)
+    fine_x: u3,
 
     data_buffer: u8,
 
@@ -89,20 +99,14 @@ pub const PPU = struct {
     /// Set to true when a frame has finished rendering
     frame_complete: bool,
 
-    // Debug counters
-    debug_nt_writes: u32,
-    debug_ppudata_writes: u32,
-    debug_min_ppudata_addr: u16,
-    debug_max_ppudata_addr: u16,
-
     pub fn init() PPU {
         return PPU{
             .rom = null,
             .ctrl = @bitCast(@as(u8, 0)),
             .w = .msb,
-            .addr = 0,
-            .scroll_x = 0,
-            .scroll_y = 0,
+            .v = 0,
+            .t = 0,
+            .fine_x = 0,
             .mask = @bitCast(@as(u8, 0)),
             .status = @bitCast(@as(u8, 0)),
             .nmi = false,
@@ -116,30 +120,50 @@ pub const PPU = struct {
             .oam_addr = 0,
             .frame_buffer = undefined,
             .frame_complete = false,
-            .debug_nt_writes = 0,
-            .debug_ppudata_writes = 0,
-            .debug_min_ppudata_addr = 0xFFFF,
-            .debug_max_ppudata_addr = 0,
         };
     }
 
-    pub fn load_rom(self: *PPU, rom: *const Rom) void {
+    pub fn load_rom(self: *PPU, rom: *Rom) void {
         self.rom = rom;
     }
 
     pub fn clock(self: *PPU) void {
-        // Pre-render scanline
-        if (self.scanline == -1 and self.cycle == 1) {
+        const rendering_enabled = self.mask.show_background or self.mask.show_sprites;
+        const visible_line = self.scanline >= 0 and self.scanline < 240;
+        const pre_render_line = self.scanline == -1;
+
+        // Pre-render scanline: clear flags
+        if (pre_render_line and self.cycle == 1) {
             self.status.vertical_blank = false;
             self.status.sprite_0_hit = false;
             self.status.sprite_overflow = false;
         }
 
-        // Visible scanlines (0-239)
-        if (self.scanline >= 0 and self.scanline < 240) {
-            // Visible cycles (1-256)
-            if (self.cycle >= 1 and self.cycle <= 256) {
-                self.render_pixel();
+        // Visible scanlines: render pixels
+        if (visible_line and self.cycle >= 1 and self.cycle <= 256) {
+            self.render_pixel();
+        }
+
+        // V register updates during rendering
+        if (rendering_enabled and (visible_line or pre_render_line)) {
+            // Increment coarse X every 8 cycles during visible pixel rendering
+            if (self.cycle >= 8 and self.cycle <= 256 and self.cycle & 7 == 0) {
+                self.increment_coarse_x();
+            }
+
+            // Increment Y at end of visible pixels
+            if (self.cycle == 256) {
+                self.increment_y();
+            }
+
+            // Copy horizontal bits from t to v
+            if (self.cycle == 257) {
+                self.v = (self.v & ~@as(u16, 0x041F)) | (self.t & 0x041F);
+            }
+
+            // Copy vertical bits from t to v during pre-render
+            if (pre_render_line and self.cycle >= 280 and self.cycle <= 304) {
+                self.v = (self.v & ~@as(u16, 0x7BE0)) | (self.t & 0x7BE0);
             }
         }
 
@@ -147,21 +171,6 @@ pub const PPU = struct {
         if (self.scanline == 241 and self.cycle == 1) {
             self.status.vertical_blank = true;
             self.frame_complete = true;
-            // Debug: count non-zero tiles in both nametables
-            var nz0: u16 = 0;
-            var nz1: u16 = 0;
-            for (0..960) |i| {
-                if (self.ppu_read(0x2000 + @as(u16, @intCast(i))) != 0) nz0 += 1;
-                if (self.ppu_read(0x2400 + @as(u16, @intCast(i))) != 0) nz1 += 1;
-            }
-            // Also check raw nameTable arrays
-            var raw0: u16 = 0;
-            var raw1: u16 = 0;
-            for (0..960) |i| {
-                if (self.nameTable[0][i] != 0) raw0 += 1;
-                if (self.nameTable[1][i] != 0) raw1 += 1;
-            }
-            // Simplified debug - removed for now
             if (self.ctrl.nmi_enabled) {
                 self.nmi = true;
             }
@@ -179,6 +188,33 @@ pub const PPU = struct {
         }
     }
 
+    fn increment_coarse_x(self: *PPU) void {
+        if (self.v & 0x001F == 31) {
+            self.v &= ~@as(u16, 0x001F);
+            self.v ^= 0x0400;
+        } else {
+            self.v += 1;
+        }
+    }
+
+    fn increment_y(self: *PPU) void {
+        if (self.v & 0x7000 != 0x7000) {
+            self.v += 0x1000;
+        } else {
+            self.v &= ~@as(u16, 0x7000);
+            var coarse_y: u16 = (self.v & 0x03E0) >> 5;
+            if (coarse_y == 29) {
+                coarse_y = 0;
+                self.v ^= 0x0800;
+            } else if (coarse_y == 31) {
+                coarse_y = 0;
+            } else {
+                coarse_y += 1;
+            }
+            self.v = (self.v & ~@as(u16, 0x03E0)) | (coarse_y << 5);
+        }
+    }
+
     fn render_pixel(self: *PPU) void {
         const x: u16 = @intCast(self.cycle - 1);
         const y: u16 = @intCast(self.scanline);
@@ -187,46 +223,48 @@ pub const PPU = struct {
         var bg_palette: u8 = 0;
 
         if (self.mask.show_background) {
-            // Calculate tile coordinates in nametable
-            const tile_x = x / 8;
-            const tile_y = y / 8;
+            const fine_y: u3 = @truncate(self.v >> 12);
+            const pixel_col: u3 = @truncate(x + @as(u16, self.fine_x));
 
-            // Fine x and y within the tile
-            const fine_x: u3 = @truncate(x);
-            const fine_y: u3 = @truncate(y);
+            // Determine if we need to look at the next tile due to fine_x offset.
+            // v's coarse_x tracks the current tile fetch position (incremented every 8 cycles).
+            // When (x % 8) + fine_x >= 8, the pixel falls in the next tile.
+            var tile_v = self.v;
+            if ((x & 7) + @as(u16, self.fine_x) >= 8) {
+                if (tile_v & 0x1F == 31) {
+                    tile_v = (tile_v & ~@as(u16, 0x1F)) ^ 0x0400;
+                } else {
+                    tile_v += 1;
+                }
+            }
 
-            // Get nametable address based on base_nametable_addr
-            const nametable_base: u16 = 0x2000 + @as(u16, self.ctrl.base_nametable_addr) * 0x400;
+            const coarse_x: u16 = tile_v & 0x1F;
+            const coarse_y: u16 = (tile_v >> 5) & 0x1F;
+            const nt: u16 = (tile_v >> 10) & 0x03;
 
             // Get tile index from nametable
-            const tile_addr = nametable_base + tile_y * 32 + tile_x;
-            const tile_id = self.ppu_read(tile_addr);
+            const tile_addr: u16 = 0x2000 | (nt << 10) | (coarse_y << 5) | coarse_x;
+            const tile_id: u16 = self.ppu_read(tile_addr);
 
             // Get pattern table address
             const pattern_base: u16 = @as(u16, self.ctrl.background_pattern_table_address) * 0x1000;
-            const pattern_addr = pattern_base + @as(u16, tile_id) * 16 + fine_y;
+            const pattern_addr = pattern_base + tile_id * 16 + @as(u16, fine_y);
 
             // Read the two bit planes for this row
             const tile_lsb = self.ppu_read(pattern_addr);
             const tile_msb = self.ppu_read(pattern_addr + 8);
 
             // Extract the pixel (bit 7 is leftmost pixel)
-            const bit_shift: u3 = 7 - fine_x;
+            const bit_shift: u3 = 7 - pixel_col;
             const pixel_lsb: u8 = (tile_lsb >> bit_shift) & 1;
             const pixel_msb: u8 = (tile_msb >> bit_shift) & 1;
             bg_pixel = (pixel_msb << 1) | pixel_lsb;
 
             // Get attribute byte for palette selection
-            // Attribute table is at nametable_base + 0x3C0
-            // Each byte covers 4x4 tiles (32x32 pixels)
-            const attr_x = tile_x / 4;
-            const attr_y = tile_y / 4;
-            const attr_addr = nametable_base + 0x3C0 + attr_y * 8 + attr_x;
+            const attr_addr: u16 = 0x2000 | (nt << 10) | 0x3C0 | ((coarse_y >> 2) << 3) | (coarse_x >> 2);
             const attr_byte = self.ppu_read(attr_addr);
 
-            // Each attribute byte has 4 palettes for 4 2x2 tile groups
-            // Bits 0-1: top-left, 2-3: top-right, 4-5: bottom-left, 6-7: bottom-right
-            const attr_shift: u3 = @truncate(((tile_y & 2) << 1) | (tile_x & 2));
+            const attr_shift: u3 = @truncate(((coarse_y & 2) << 1) | (coarse_x & 2));
             bg_palette = (attr_byte >> attr_shift) & 0x03;
         }
 
@@ -340,13 +378,14 @@ pub const PPU = struct {
             0x0006 => 0,
             0x0007 => a: {
                 var d = self.data_buffer;
+                const addr = self.v & 0x3FFF;
 
-                self.data_buffer = self.ppu_read(self.addr);
-                if (self.addr >= 0x3f00) {
+                self.data_buffer = self.ppu_read(addr);
+                if (addr >= 0x3f00) {
                     d = self.data_buffer;
                 }
 
-                self.addr += self.ctrl.get_vram_increment();
+                self.v +%= self.ctrl.get_vram_increment();
                 break :a d;
             },
             else => {
@@ -361,6 +400,8 @@ pub const PPU = struct {
             // Control
             0x0000 => {
                 self.ctrl = @bitCast(v);
+                // Update nametable select bits in t
+                self.t = (self.t & ~@as(u16, 0x0C00)) | (@as(u16, v & 0x03) << 10);
             },
             // Mask
             0x0001 => {
@@ -378,30 +419,33 @@ pub const PPU = struct {
             // Scroll
             0x0005 => {
                 if (self.w == .msb) {
-                    self.scroll_x = v;
+                    // First write: set coarse X and fine X
+                    self.t = (self.t & ~@as(u16, 0x001F)) | (@as(u16, v) >> 3);
+                    self.fine_x = @truncate(v);
                     self.w = .lsb;
                 } else {
-                    self.scroll_y = v;
+                    // Second write: set coarse Y and fine Y
+                    self.t = (self.t & ~@as(u16, 0x73E0)) | (@as(u16, v & 0x07) << 12) | (@as(u16, v >> 3) << 5);
                     self.w = .msb;
                 }
             },
             // PPU Address
             0x0006 => {
                 if (self.w == .msb) {
-                    self.addr = (@as(u16, v) << 8) | (self.addr & 0x00FF);
+                    // First write: set high byte of t, clear bit 14
+                    self.t = (@as(u16, v & 0x3F) << 8) | (self.t & 0x00FF);
                     self.w = .lsb;
                 } else {
-                    self.addr = (self.addr & 0xFF00) | @as(u16, v);
+                    // Second write: set low byte of t, copy t to v
+                    self.t = (self.t & 0xFF00) | @as(u16, v);
+                    self.v = self.t;
                     self.w = .msb;
                 }
             },
             // PPU Data
             0x0007 => {
-                self.debug_ppudata_writes += 1;
-                if (self.addr < self.debug_min_ppudata_addr) self.debug_min_ppudata_addr = self.addr;
-                if (self.addr > self.debug_max_ppudata_addr) self.debug_max_ppudata_addr = self.addr;
-                self.ppu_write(self.addr, v);
-                self.addr += self.ctrl.get_vram_increment();
+                self.ppu_write(self.v & 0x3FFF, v);
+                self.v +%= self.ctrl.get_vram_increment();
             },
             else => {
                 unreachable;
@@ -418,24 +462,8 @@ pub const PPU = struct {
             return self.patternTable[(k & 0x1000) >> 12][addr & 0x0fff];
         } else if (k >= 0x2000 and k <= 0x3eff) {
             k &= 0x0fff;
-
-            if (self.rom.?.header.flags6.vertically_mirrored) {
-                return switch (k) {
-                    0x0000...0x03ff => self.nameTable[0][k & 0x03ff],
-                    0x0400...0x07ff => self.nameTable[1][k & 0x03ff],
-                    0x0800...0x0bff => self.nameTable[0][k & 0x03ff],
-                    0x0C00...0x0fff => self.nameTable[1][k & 0x03ff],
-                    else => unreachable,
-                };
-            } else {
-                return switch (k) {
-                    0x0000...0x03ff => self.nameTable[0][k & 0x03ff],
-                    0x0400...0x07ff => self.nameTable[0][k & 0x03ff],
-                    0x0800...0x0bff => self.nameTable[1][k & 0x03ff],
-                    0x0C00...0x0fff => self.nameTable[1][k & 0x03ff],
-                    else => unreachable,
-                };
-            }
+            const table, const offset = self.mirror_nametable_addr(k);
+            return self.nameTable[table][offset];
         } else if (k >= 0x3f00 and k <= 0x3fff) {
             k &= 0x001f;
             k = switch (k) {
@@ -457,26 +485,9 @@ pub const PPU = struct {
         if (self.rom.?.write_chr(k, v)) {} else if (k >= 0x0000 and k <= 0x1fff) {
             self.patternTable[(k & 0x1000) >> 12][k & 0x0fff] = v;
         } else if (k >= 0x2000 and k <= 0x3eff) {
-            self.debug_nt_writes += 1;
             k &= 0x0fff;
-
-            if (self.rom.?.header.flags6.vertically_mirrored) {
-                switch (k) {
-                    0x0000...0x03ff => self.nameTable[0][k & 0x03ff] = v,
-                    0x0400...0x07ff => self.nameTable[1][k & 0x03ff] = v,
-                    0x0800...0x0bff => self.nameTable[0][k & 0x03ff] = v,
-                    0x0C00...0x0fff => self.nameTable[1][k & 0x03ff] = v,
-                    else => unreachable,
-                }
-            } else {
-                switch (k) {
-                    0x0000...0x03ff => self.nameTable[0][k & 0x03ff] = v,
-                    0x0400...0x07ff => self.nameTable[0][k & 0x03ff] = v,
-                    0x0800...0x0bff => self.nameTable[1][k & 0x03ff] = v,
-                    0x0C00...0x0fff => self.nameTable[1][k & 0x03ff] = v,
-                    else => unreachable,
-                }
-            }
+            const table, const offset = self.mirror_nametable_addr(k);
+            self.nameTable[table][offset] = v;
         } else if (k >= 0x3f00 and k <= 0x3fff) {
             k &= 0x001f;
             k = switch (k) {
@@ -489,6 +500,18 @@ pub const PPU = struct {
 
             self.paletteTable[k] = v;
         }
+    }
+
+    fn mirror_nametable_addr(self: *PPU, k: u16) struct { usize, u16 } {
+        const table_index: u2 = @truncate(k >> 10);
+        const offset: u16 = k & 0x03FF;
+        const physical_table: usize = switch (self.rom.?.get_mirror_mode()) {
+            .one_screen_lower => 0,
+            .one_screen_upper => 1,
+            .vertical => @as(usize, table_index & 1),
+            .horizontal => @as(usize, table_index >> 1),
+        };
+        return .{ physical_table, offset };
     }
 
     fn get_color_from_palette_ram(self: *PPU, palette: u8, pixel: u8) u32 {
@@ -512,11 +535,11 @@ pub const PPU = struct {
                         tile_lsb >>= 1;
                         tile_msb >>= 1;
 
-                        const x = tx * 8 + (7 - col);
-                        const y = ty * 8 + row;
+                        const x_pos = tx * 8 + (7 - col);
+                        const y_pos = ty * 8 + row;
                         _ = self.get_color_from_palette_ram(palette, pixel);
 
-                        buf[y * 256 + x + sc_offset] = nesPalette[pixel];
+                        buf[y_pos * 256 + x_pos + sc_offset] = nesPalette[pixel];
                     }
                 }
             }

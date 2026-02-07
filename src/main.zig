@@ -21,7 +21,7 @@ pub fn main() !void {
     if (args.len > 2 and std.mem.indexOf(u8, args[1], "disasm") != null) {
         const romName: []const u8 = args[2];
         const rom_buffer = try std.fs.cwd().readFile(romName, &max_rom_buffer);
-        const loaded_rom = try rom.Rom.load(rom_buffer);
+        var loaded_rom = try rom.Rom.load(rom_buffer);
         try cpu_debug.disassemble(&loaded_rom, std.io.getStdOut().writer());
         return;
     }
@@ -31,7 +31,7 @@ pub fn main() !void {
         const romName: []const u8 = args[2];
         const num_frames: u32 = if (args.len > 3) std.fmt.parseInt(u32, args[3], 10) catch 120 else 120;
         const rom_buffer2 = try std.fs.cwd().readFile(romName, &max_rom_buffer);
-        const loaded_rom2 = try rom.Rom.load(rom_buffer2);
+        var loaded_rom2 = try rom.Rom.load(rom_buffer2);
         var nes2: Bus = Bus.init();
         nes2.cpu.bus = &nes2;
         nes2.load_rom(&loaded_rom2);
@@ -74,7 +74,7 @@ pub fn main() !void {
 
     const is_functional_test_rom = std.mem.indexOf(u8, romName, "6502_functional_test") != null;
 
-    const loaded_rom = if (is_functional_test_rom)
+    var loaded_rom = if (is_functional_test_rom)
         try rom.Rom.load_unchecked(rom_buffer)
     else
         try rom.Rom.load(rom_buffer);
