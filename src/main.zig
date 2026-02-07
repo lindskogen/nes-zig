@@ -42,7 +42,6 @@ pub fn main() !void {
             nes2.clock();
             if (nes2.ppu.frame_complete) {
                 frames += 1;
-                // Run until frame_complete clears
                 while (nes2.ppu.frame_complete) {
                     nes2.clock();
                 }

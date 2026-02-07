@@ -230,13 +230,89 @@ pub const PPU = struct {
             bg_palette = (attr_byte >> attr_shift) & 0x03;
         }
 
-        // Get the final color
+        // Sprite evaluation
+        var sprite_pixel: u8 = 0;
+        var sprite_palette: u8 = 0;
+        var sprite_priority: bool = false; // false = in front of BG
+        var sprite_zero_hit: bool = false;
+
+        if (self.mask.show_sprites and !(x < 8 and !self.mask.show_sprites_left)) {
+            const sprite_height: u16 = if (self.ctrl.sprite_size == 1) 16 else 8;
+
+            for (0..64) |i| {
+                const sprite_y: u16 = @as(u16, self.oam[i * 4 + 0]) + 1;
+                const sprite_x: u16 = self.oam[i * 4 + 3];
+
+                // Check if this sprite is on the current pixel
+                if (x < sprite_x or x >= sprite_x + 8) continue;
+                if (y < sprite_y or y >= sprite_y + sprite_height) continue;
+
+                const tile_id: u16 = self.oam[i * 4 + 1];
+                const attr = self.oam[i * 4 + 2];
+                const flip_h = attr & 0x40 != 0;
+                const flip_v = attr & 0x80 != 0;
+
+                // Row within the sprite
+                var row: u16 = y - sprite_y;
+                if (flip_v) row = sprite_height - 1 - row;
+
+                // Pattern table address
+                var pattern_addr: u16 = undefined;
+                if (self.ctrl.sprite_size == 1) {
+                    // 8x16 mode: bit 0 of tile_id selects pattern table
+                    const table: u16 = (tile_id & 1) * 0x1000;
+                    const base_tile = tile_id & 0xFE;
+                    if (row < 8) {
+                        pattern_addr = table + base_tile * 16 + row;
+                    } else {
+                        pattern_addr = table + (base_tile + 1) * 16 + (row - 8);
+                    }
+                } else {
+                    // 8x8 mode
+                    const table: u16 = @as(u16, self.ctrl.sprite_pattern_table_addr) * 0x1000;
+                    pattern_addr = table + tile_id * 16 + row;
+                }
+
+                const tile_lsb = self.ppu_read(pattern_addr);
+                const tile_msb = self.ppu_read(pattern_addr + 8);
+
+                // Column within the sprite
+                var col: u3 = @truncate(x - sprite_x);
+                if (!flip_h) col = 7 - col;
+
+                const pixel_lsb: u8 = (tile_lsb >> col) & 1;
+                const pixel_msb: u8 = (tile_msb >> col) & 1;
+                const pixel = (pixel_msb << 1) | pixel_lsb;
+
+                if (pixel == 0) continue; // Transparent
+
+                // First non-transparent sprite wins
+                sprite_pixel = pixel;
+                sprite_palette = attr & 0x03;
+                sprite_priority = attr & 0x20 != 0;
+
+                // Sprite 0 hit detection
+                if (i == 0 and bg_pixel != 0 and x != 255) {
+                    sprite_zero_hit = true;
+                }
+                break;
+            }
+        }
+
+        if (sprite_zero_hit) {
+            self.status.sprite_0_hit = true;
+        }
+
+        // Combine background and sprite
         var color: u32 = undefined;
-        if (bg_pixel == 0) {
-            // Transparent - use background color
+        if (bg_pixel == 0 and sprite_pixel == 0) {
             color = self.get_color_from_palette_ram(0, 0);
-        } else {
+        } else if (bg_pixel == 0) {
+            color = self.get_color_from_palette_ram(sprite_palette + 4, sprite_pixel);
+        } else if (sprite_pixel == 0 or sprite_priority) {
             color = self.get_color_from_palette_ram(bg_palette, bg_pixel);
+        } else {
+            color = self.get_color_from_palette_ram(sprite_palette + 4, sprite_pixel);
         }
 
         // Write to frame buffer
