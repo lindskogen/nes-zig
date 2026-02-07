@@ -26,3 +26,8 @@ roms
 out
 *.swp
 
+*.png
+*.ppm
+*.wav
+
+.claude
