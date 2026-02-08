@@ -67,10 +67,13 @@ pub fn build(b: *std.Build) void {
 
     exe.addIncludePath(b.path("vendor"));
     exe.addCSourceFile(.{ .file = b.path("vendor/fenster.c") });
+    exe.addCSourceFile(.{ .file = b.path("vendor/miniaudio.c"), .flags = &.{ "-fno-sanitize=undefined", "-Wno-incompatible-function-pointer-types" } });
 
     switch (target.result.os.tag) {
         .macos => {
             exe.linkFramework("Cocoa");
+            exe.linkFramework("CoreAudio");
+            exe.linkFramework("AudioToolbox");
         },
         .windows => {
             exe.linkSystemLibrary("gdi32");

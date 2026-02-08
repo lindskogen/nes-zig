@@ -2,6 +2,7 @@ const std = @import("std");
 const Rom = @import("rom.zig").Rom;
 const CPU = @import("cpu.zig").CPU;
 const PPU = @import("ppu.zig").PPU;
+const APU = @import("apu.zig").APU;
 
 pub const Bus = struct {
     cpu: CPU,
@@ -13,6 +14,7 @@ pub const Bus = struct {
     /// PRG RAM ($6000-$7FFF)
     prg_ram: [8192]u8,
     ppu: PPU,
+    apu: APU,
 
     cycles: u32,
 
@@ -20,7 +22,7 @@ pub const Bus = struct {
     controllers_cache: [2]u8,
 
     pub fn init() Bus {
-        return Bus{ .rom = null, .ram = undefined, .prg_ram = std.mem.zeroes([8192]u8), .cpu = CPU.init(), .ppu = PPU.init(), .cycles = 0, .controllers = undefined, .controllers_cache = undefined };
+        return Bus{ .rom = null, .ram = undefined, .prg_ram = std.mem.zeroes([8192]u8), .cpu = CPU.init(), .ppu = PPU.init(), .apu = APU.init(), .cycles = 0, .controllers = undefined, .controllers_cache = undefined };
     }
 
     pub fn load_rom(self: *Bus, rom: *Rom) void {
@@ -38,7 +40,7 @@ pub const Bus = struct {
         } else if (k >= 0x2000 and k <= 0x3fff) {
             self.ppu.cpu_write(k & 0x0007, v);
         } else if (k >= 0x4000 and k <= 0x4013) {
-            // TODO: APU
+            self.apu.cpu_write(k, v);
         } else if (k == 0x4014) {
             // OAM DMA - copy 256 bytes from CPU memory to OAM
             const base: u16 = @as(u16, v) << 8;
@@ -47,9 +49,12 @@ pub const Bus = struct {
             }
             // DMA takes 513/514 CPU cycles, but we'll ignore timing for now
         } else if (k == 0x4015) {
-            // APU status
-        } else if (k >= 0x4016 and k <= 0x4017) {
-            self.controllers_cache[k & 0x0001] = self.controllers[k & 0x0001];
+            self.apu.cpu_write(k, v);
+        } else if (k == 0x4016) {
+            self.controllers_cache[0] = self.controllers[0];
+        } else if (k == 0x4017) {
+            // $4017 write goes to APU frame counter
+            self.apu.cpu_write(k, v);
         } else if (k >= 0x6000 and k <= 0x7FFF) {
             self.prg_ram[k - 0x6000] = v;
         } else {
@@ -65,8 +70,10 @@ pub const Bus = struct {
             return self.ram[k & 0x07ff];
         } else if (k >= 0x2000 and k <= 0x3fff) {
             return self.ppu.cpu_read(k & 0x0007);
-        } else if (k >= 0x4000 and k <= 0x4015) {
-            // APU
+        } else if (k == 0x4015) {
+            return self.apu.cpu_read(k);
+        } else if (k >= 0x4000 and k <= 0x4014) {
+            // APU registers (write-only), open bus
             return 0x00;
         } else if (k >= 0x4016 and k <= 0x4017) {
             const r = (self.controllers_cache[k & 0x0001] & 0x80) > 0;
@@ -91,11 +98,23 @@ pub const Bus = struct {
 
         if (self.cycles % 3 == 0) {
             self.cpu.clock();
+            self.apu.clock();
+
+            // Service DMC read requests
+            if (self.apu.dmc_read_pending) {
+                self.apu.dmc_read_pending = false;
+                const data = self.read(self.apu.dmc_read_addr);
+                self.apu.dmc.fill_sample_buffer(data);
+            }
         }
 
         if (self.ppu.nmi) {
             self.ppu.nmi = false;
             self.cpu.nmi();
+        }
+
+        if (self.apu.irq_pending) {
+            self.cpu.irq();
         }
 
         self.cycles += 1;
