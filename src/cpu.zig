@@ -231,6 +231,40 @@ pub const CPU = struct {
         self.a &= val;
         self.set_nz_flags(self.a);
     }
+    fn op_lax(self: *CPU, val: u8) void {
+        self.a = val;
+        self.x = val;
+        self.set_nz_flags(val);
+    }
+    fn op_anc(self: *CPU, val: u8) void {
+        self.a &= val;
+        self.set_nz_flags(self.a);
+        self.p.carry = self.p.negative;
+    }
+    fn op_alr(self: *CPU, val: u8) void {
+        self.a &= val;
+        self.p.carry = self.a & 1 != 0;
+        self.a >>= 1;
+        self.set_nz_flags(self.a);
+    }
+    fn op_axs(self: *CPU, val: u8) void {
+        const t: u8 = self.a & self.x;
+        self.p.carry = t >= val;
+        self.x = t -% val;
+        self.set_nz_flags(self.x);
+    }
+    fn op_atx(self: *CPU, val: u8) void {
+        self.a = (self.a | 0xff) & val;
+        self.x = self.a;
+        self.set_nz_flags(self.a);
+    }
+    fn op_arr(self: *CPU, val: u8) void {
+        self.a &= val;
+        self.a = (self.a >> 1) | (if (self.p.carry) @as(u8, 0x80) else @as(u8, 0));
+        self.set_nz_flags(self.a);
+        self.p.carry = self.a & 0x40 != 0;
+        self.p.overflow = (self.a & 0x40 != 0) != (self.a & 0x20 != 0);
+    }
     fn op_ora(self: *CPU, val: u8) void {
         self.a |= val;
         self.set_nz_flags(self.a);
@@ -258,6 +292,35 @@ pub const CPU = struct {
     }
 
     // RMW operations: take old value, return new value
+    fn op_slo(self: *CPU, val: u8) u8 {
+        self.p.carry = (val & 0x80) != 0;
+        const res = val << 1;
+        self.a |= res;
+        self.set_nz_flags(self.a);
+        return res;
+    }
+    fn op_rla(self: *CPU, val: u8) u8 {
+        const carry_in: u8 = if (self.p.carry) 1 else 0;
+        self.p.carry = (val & 0x80) != 0;
+        const res = (val << 1) | carry_in;
+        self.a &= res;
+        self.set_nz_flags(self.a);
+        return res;
+    }
+    fn op_rra(self: *CPU, val: u8) u8 {
+        const carry_in: u8 = if (self.p.carry) 0x80 else 0;
+        self.p.carry = (val & 1) != 0;
+        const res = (val >> 1) | carry_in;
+        self.add_with_carry(res);
+        return res;
+    }
+    fn op_sre(self: *CPU, val: u8) u8 {
+        self.p.carry = (val & 1) != 0;
+        const res = val >> 1;
+        self.a ^= res;
+        self.set_nz_flags(self.a);
+        return res;
+    }
     fn op_asl(self: *CPU, val: u8) u8 {
         self.p.carry = (val & 0x80) != 0;
         const res = val << 1;
@@ -284,11 +347,26 @@ pub const CPU = struct {
         self.set_nz_flags(res);
         return res;
     }
-    fn op_inc(_: *CPU, val: u8) u8 {
-        return val +% 1;
+    fn op_isc(self: *CPU, val: u8) u8 {
+        const res = val +% 1;
+        self.add_with_carry(res ^ 0xff);
+        return res;
     }
-    fn op_dec(_: *CPU, val: u8) u8 {
-        return val -% 1;
+    fn op_dcp(self: *CPU, val: u8) u8 {
+        const res = val -% 1;
+        self.p.carry = self.a >= res;
+        self.set_nz_flags(self.a -% res);
+        return res;
+    }
+    fn op_inc(self: *CPU, val: u8) u8 {
+        const res = val +% 1;
+        self.set_nz_flags(res);
+        return res;
+    }
+    fn op_dec(self: *CPU, val: u8) u8 {
+        const res = val -% 1;
+        self.set_nz_flags(res);
+        return res;
     }
 
     // ─── Addressing mode templates ──────────────────────────────────────────
@@ -374,7 +452,6 @@ pub const CPU = struct {
                     },
                     4 => {
                         self.write(self.addr & 0xFF, self.data);
-                        self.set_nz_flags(self.data);
                         self.step = 0;
                     },
                     else => unreachable,
@@ -512,7 +589,6 @@ pub const CPU = struct {
                     },
                     5 => {
                         self.write(self.addr & 0xFF, self.data);
-                        self.set_nz_flags(self.data);
                         self.step = 0;
                     },
                     else => unreachable,
@@ -598,7 +674,6 @@ pub const CPU = struct {
                     },
                     5 => {
                         self.write(self.addr, self.data);
-                        self.set_nz_flags(self.data);
                         self.step = 0;
                     },
                     else => unreachable,
@@ -618,29 +693,22 @@ pub const CPU = struct {
                         self.step = 2;
                     },
                     2 => {
-                        self.data2 = self.read(self.pc);
+                        const hi = self.read(self.pc);
                         self.pc +%= 1;
-                        // Check for page cross
                         const lo: u8 = @truncate(self.addr);
-                        const sum = @as(u16, lo) + @as(u16, self.x);
-                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
-                        if (sum > 0xFF) {
-                            self.data = 1; // page crossed flag
-                        } else {
-                            self.data = 0;
-                        }
+                        _, const page_cross = @addWithOverflow(lo, self.x);
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.x);
+                        self.data = page_cross;
                         self.step = 3;
                     },
                     3 => {
                         if (self.data == 0) {
-                            // No page cross — read and done
                             const val = self.read(self.addr);
                             op(self, val);
                             self.step = 0;
                         } else {
-                            // Page cross — dummy read at wrong address, fix high byte
-                            _ = self.read(self.addr);
-                            self.addr +%= 0x100;
+                            _ = self.read(self.addr -% 0x100);
                             self.step = 4;
                         }
                     },
@@ -666,16 +734,13 @@ pub const CPU = struct {
                         self.step = 2;
                     },
                     2 => {
-                        self.data2 = self.read(self.pc);
+                        const hi = self.read(self.pc);
                         self.pc +%= 1;
                         const lo: u8 = @truncate(self.addr);
-                        const sum = @as(u16, lo) + @as(u16, self.y);
-                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
-                        if (sum > 0xFF) {
-                            self.data = 1;
-                        } else {
-                            self.data = 0;
-                        }
+                        _, const page_cross = @addWithOverflow(lo, self.y);
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.y);
+                        self.data = page_cross;
                         self.step = 3;
                     },
                     3 => {
@@ -684,8 +749,7 @@ pub const CPU = struct {
                             op(self, val);
                             self.step = 0;
                         } else {
-                            _ = self.read(self.addr);
-                            self.addr +%= 0x100;
+                            _ = self.read(self.addr -% 0x100);
                             self.step = 4;
                         }
                     },
@@ -711,24 +775,16 @@ pub const CPU = struct {
                         self.step = 2;
                     },
                     2 => {
-                        self.data2 = self.read(self.pc);
+                        const hi = self.read(self.pc);
                         self.pc +%= 1;
                         const lo: u8 = @truncate(self.addr);
-                        const sum = @as(u16, lo) + @as(u16, self.x);
-                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
-                        if (sum > 0xFF) {
-                            self.data = 1;
-                        } else {
-                            self.data = 0;
-                        }
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.x);
                         self.step = 3;
                     },
                     3 => {
-                        // Dummy read (always happens for writes)
+                        // Dummy read (always for writes)
                         _ = self.read(self.addr);
-                        if (self.data != 0) {
-                            self.addr +%= 0x100;
-                        }
                         self.step = 4;
                     },
                     4 => {
@@ -752,23 +808,15 @@ pub const CPU = struct {
                         self.step = 2;
                     },
                     2 => {
-                        self.data2 = self.read(self.pc);
+                        const hi = self.read(self.pc);
                         self.pc +%= 1;
                         const lo: u8 = @truncate(self.addr);
-                        const sum = @as(u16, lo) + @as(u16, self.y);
-                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
-                        if (sum > 0xFF) {
-                            self.data = 1;
-                        } else {
-                            self.data = 0;
-                        }
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.y);
                         self.step = 3;
                     },
                     3 => {
                         _ = self.read(self.addr);
-                        if (self.data != 0) {
-                            self.addr +%= 0x100;
-                        }
                         self.step = 4;
                     },
                     4 => {
@@ -792,24 +840,16 @@ pub const CPU = struct {
                         self.step = 2;
                     },
                     2 => {
-                        self.data2 = self.read(self.pc);
+                        const hi = self.read(self.pc);
                         self.pc +%= 1;
                         const lo: u8 = @truncate(self.addr);
-                        const sum = @as(u16, lo) + @as(u16, self.x);
-                        self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
-                        if (sum > 0xFF) {
-                            self.data = 1;
-                        } else {
-                            self.data = 0;
-                        }
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.x);
                         self.step = 3;
                     },
                     3 => {
-                        // Dummy read at potentially wrong address
+                        // Dummy read at effective address
                         _ = self.read(self.addr);
-                        if (self.data != 0) {
-                            self.addr +%= 0x100;
-                        }
                         self.step = 4;
                     },
                     4 => {
@@ -823,7 +863,133 @@ pub const CPU = struct {
                     },
                     6 => {
                         self.write(self.addr, self.data);
-                        self.set_nz_flags(self.data);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // Absolute,Y RMW: 7 cycles (always extra cycle)
+    fn aby_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.addr = self.read(self.pc);
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        const hi = self.read(self.pc);
+                        self.pc +%= 1;
+                        const lo: u8 = @truncate(self.addr);
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.y);
+                        self.step = 3;
+                    },
+                    3 => {
+                        _ = self.read(self.addr);
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.data = self.read(self.addr);
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.write(self.addr, self.data);
+                        self.data = op(self, self.data);
+                        self.step = 6;
+                    },
+                    6 => {
+                        self.write(self.addr, self.data);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // (Indirect,X) RMW: 8 cycles
+    fn izx_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        _ = self.read(self.ptr);
+                        self.ptr +%= self.x;
+                        self.step = 3;
+                    },
+                    3 => {
+                        self.addr = self.read(self.ptr);
+                        self.step = 4;
+                    },
+                    4 => {
+                        self.addr |= @as(u16, self.read(self.ptr +% 1)) << 8;
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.data = self.read(self.addr);
+                        self.step = 6;
+                    },
+                    6 => {
+                        self.write(self.addr, self.data);
+                        self.data = op(self, self.data);
+                        self.step = 7;
+                    },
+                    7 => {
+                        self.write(self.addr, self.data);
+                        self.step = 0;
+                    },
+                    else => unreachable,
+                }
+            }
+        }.handler;
+    }
+
+    // (Indirect),Y RMW: 8 cycles (always extra cycle)
+    fn izy_rmw(comptime op: fn (*CPU, u8) u8) fn (*CPU) void {
+        return struct {
+            fn handler(self: *CPU) void {
+                switch (self.step) {
+                    1 => {
+                        self.ptr = @truncate(self.read(self.pc));
+                        self.pc +%= 1;
+                        self.step = 2;
+                    },
+                    2 => {
+                        self.addr = self.read(self.ptr);
+                        self.step = 3;
+                    },
+                    3 => {
+                        const hi = self.read(self.ptr +% 1);
+                        const lo: u8 = @truncate(self.addr);
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.y);
+                        self.step = 4;
+                    },
+                    4 => {
+                        _ = self.read(self.addr);
+                        self.step = 5;
+                    },
+                    5 => {
+                        self.data = self.read(self.addr);
+                        self.step = 6;
+                    },
+                    6 => {
+                        self.write(self.addr, self.data);
+                        self.data = op(self, self.data);
+                        self.step = 7;
+                    },
+                    7 => {
+                        self.write(self.addr, self.data);
                         self.step = 0;
                     },
                     else => unreachable,
@@ -917,13 +1083,10 @@ pub const CPU = struct {
                     3 => {
                         const hi = self.read(self.ptr +% 1);
                         const lo: u8 = @truncate(self.addr);
-                        const sum = @as(u16, lo) + @as(u16, self.y);
-                        self.addr = (@as(u16, hi) << 8) | @as(u16, @truncate(sum));
-                        if (sum > 0xFF) {
-                            self.data = 1; // page crossed
-                        } else {
-                            self.data = 0;
-                        }
+                        _, const page_cross = @addWithOverflow(lo, self.y);
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.y);
+                        self.data = page_cross;
                         self.step = 4;
                     },
                     4 => {
@@ -932,8 +1095,7 @@ pub const CPU = struct {
                             op(self, val);
                             self.step = 0;
                         } else {
-                            _ = self.read(self.addr);
-                            self.addr +%= 0x100;
+                            _ = self.read(self.addr -% 0x100);
                             self.step = 5;
                         }
                     },
@@ -965,21 +1127,13 @@ pub const CPU = struct {
                     3 => {
                         const hi = self.read(self.ptr +% 1);
                         const lo: u8 = @truncate(self.addr);
-                        const sum = @as(u16, lo) + @as(u16, self.y);
-                        self.addr = (@as(u16, hi) << 8) | @as(u16, @truncate(sum));
-                        if (sum > 0xFF) {
-                            self.data = 1;
-                        } else {
-                            self.data = 0;
-                        }
+                        self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                        self.addr +%= @as(u16, self.y);
                         self.step = 4;
                     },
                     4 => {
                         // Dummy read (always for writes)
                         _ = self.read(self.addr);
-                        if (self.data != 0) {
-                            self.addr +%= 0x100;
-                        }
                         self.step = 5;
                     },
                     5 => {
@@ -1028,6 +1182,9 @@ pub const CPU = struct {
     }
 
     // ─── Value getters for write operations ─────────────────────────────────
+    fn get_ax(self: *CPU) u8 {
+        return self.a & self.x;
+    }
     fn get_a(self: *CPU) u8 {
         return self.a;
     }
@@ -1504,16 +1661,13 @@ pub const CPU = struct {
                 self.step = 2;
             },
             2 => {
-                self.data2 = self.read(self.pc);
+                const hi = self.read(self.pc);
                 self.pc +%= 1;
                 const lo: u8 = @truncate(self.addr);
-                const sum = @as(u16, lo) + @as(u16, self.x);
-                self.addr = (@as(u16, self.data2) << 8) | @as(u16, @truncate(sum));
-                if (sum > 0xFF) {
-                    self.data = 1;
-                } else {
-                    self.data = 0;
-                }
+                _, const page_cross = @addWithOverflow(lo, self.x);
+                self.addr = (@as(u16, hi) << 8) | @as(u16, lo);
+                self.addr +%= @as(u16, self.x);
+                self.data = page_cross;
                 self.step = 3;
             },
             3 => {
@@ -1521,8 +1675,7 @@ pub const CPU = struct {
                     _ = self.read(self.addr);
                     self.step = 0;
                 } else {
-                    _ = self.read(self.addr);
-                    self.addr +%= 0x100;
+                    _ = self.read(self.addr -% 0x100);
                     self.step = 4;
                 }
             },
@@ -1540,6 +1693,76 @@ pub const CPU = struct {
         switch (self.step) {
             1 => {
                 _ = self.read(self.pc);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // SYA/SHY: abs,X write, val = Y & (high_byte + 1), page-cross glitch
+    fn exec_sya(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                self.data2 = self.read(self.pc);
+                self.pc +%= 1;
+                const lo: u8 = @truncate(self.addr);
+                _, const page_cross = @addWithOverflow(lo, self.x);
+                self.addr = (@as(u16, self.data2) << 8) | @as(u16, lo);
+                self.addr +%= @as(u16, self.x);
+                self.data = page_cross;
+                self.step = 3;
+            },
+            3 => {
+                _ = self.read(self.addr -% if (self.data != 0) @as(u16, 0x100) else @as(u16, 0));
+                const val = self.y & (self.data2 +% 1);
+                if (self.data != 0) {
+                    self.addr = (@as(u16, val) << 8) | (self.addr & 0xFF);
+                }
+                self.data = val;
+                self.step = 4;
+            },
+            4 => {
+                self.write(self.addr, self.data);
+                self.step = 0;
+            },
+            else => unreachable,
+        }
+    }
+
+    // SXA/SHX: abs,Y write, val = X & (high_byte + 1), page-cross glitch
+    fn exec_sxa(self: *CPU) void {
+        switch (self.step) {
+            1 => {
+                self.addr = self.read(self.pc);
+                self.pc +%= 1;
+                self.step = 2;
+            },
+            2 => {
+                self.data2 = self.read(self.pc);
+                self.pc +%= 1;
+                const lo: u8 = @truncate(self.addr);
+                _, const page_cross = @addWithOverflow(lo, self.y);
+                self.addr = (@as(u16, self.data2) << 8) | @as(u16, lo);
+                self.addr +%= @as(u16, self.y);
+                self.data = page_cross;
+                self.step = 3;
+            },
+            3 => {
+                _ = self.read(self.addr -% if (self.data != 0) @as(u16, 0x100) else @as(u16, 0));
+                const val = self.x & (self.data2 +% 1);
+                if (self.data != 0) {
+                    self.addr = (@as(u16, val) << 8) | (self.addr & 0xFF);
+                }
+                self.data = val;
+                self.step = 4;
+            },
+            4 => {
+                self.write(self.addr, self.data);
                 self.step = 0;
             },
             else => unreachable,
@@ -1610,6 +1833,96 @@ pub const CPU = struct {
         table[0xe1] = &izx_read(op_sbc);
         table[0xf1] = &izy_read(op_sbc);
         table[0xeb] = &immediate(op_sbc); // Unofficial SBC #n
+
+        // ANC/AAC (AND #imm, copy bit 7 to carry)
+        table[0x0b] = &immediate(op_anc);
+        table[0x2b] = &immediate(op_anc);
+
+        // ALR/ASR (AND #imm, then LSR A)
+        table[0x4b] = &immediate(op_alr);
+
+        // RLA (ROL mem, then AND into A)
+        table[0x27] = &zp_rmw(op_rla);
+        table[0x37] = &zpx_rmw(op_rla);
+        table[0x2f] = &abs_rmw(op_rla);
+        table[0x3f] = &abx_rmw(op_rla);
+        table[0x3b] = &aby_rmw(op_rla);
+        table[0x23] = &izx_rmw(op_rla);
+        table[0x33] = &izy_rmw(op_rla);
+
+        // RRA (ROR mem, then ADC into A)
+        table[0x67] = &zp_rmw(op_rra);
+        table[0x77] = &zpx_rmw(op_rra);
+        table[0x6f] = &abs_rmw(op_rra);
+        table[0x7f] = &abx_rmw(op_rra);
+        table[0x7b] = &aby_rmw(op_rra);
+        table[0x63] = &izx_rmw(op_rra);
+        table[0x73] = &izy_rmw(op_rra);
+
+        // SRE (LSR mem, then EOR into A)
+        table[0x47] = &zp_rmw(op_sre);
+        table[0x57] = &zpx_rmw(op_sre);
+        table[0x4f] = &abs_rmw(op_sre);
+        table[0x5f] = &abx_rmw(op_sre);
+        table[0x5b] = &aby_rmw(op_sre);
+        table[0x43] = &izx_rmw(op_sre);
+        table[0x53] = &izy_rmw(op_sre);
+
+        // SLO (ASL mem, then ORA into A)
+        table[0x07] = &zp_rmw(op_slo);
+        table[0x17] = &zpx_rmw(op_slo);
+        table[0x0f] = &abs_rmw(op_slo);
+        table[0x1f] = &abx_rmw(op_slo);
+        table[0x1b] = &aby_rmw(op_slo);
+        table[0x03] = &izx_rmw(op_slo);
+        table[0x13] = &izy_rmw(op_slo);
+
+        // AXS/SBX (X = (A & X) - imm)
+        table[0xcb] = &immediate(op_axs);
+
+        // ATX/LXA (AND #imm, copy A to X)
+        table[0xab] = &immediate(op_atx);
+
+        // ARR (AND #imm, then ROR A, special C/V)
+        table[0x6b] = &immediate(op_arr);
+
+        // ISC (INC mem, then SBC from A)
+        table[0xe7] = &zp_rmw(op_isc);
+        table[0xf7] = &zpx_rmw(op_isc);
+        table[0xef] = &abs_rmw(op_isc);
+        table[0xff] = &abx_rmw(op_isc);
+        table[0xfb] = &aby_rmw(op_isc);
+        table[0xe3] = &izx_rmw(op_isc);
+        table[0xf3] = &izy_rmw(op_isc);
+
+        // DCP (DEC mem, then CMP with A)
+        table[0xc7] = &zp_rmw(op_dcp);
+        table[0xd7] = &zpx_rmw(op_dcp);
+        table[0xcf] = &abs_rmw(op_dcp);
+        table[0xdf] = &abx_rmw(op_dcp);
+        table[0xdb] = &aby_rmw(op_dcp);
+        table[0xc3] = &izx_rmw(op_dcp);
+        table[0xd3] = &izy_rmw(op_dcp);
+
+        // SAX/AAX (A & X -> memory)
+        table[0x87] = &zp_write(get_ax);
+        table[0x97] = &zpy_write(get_ax);
+        table[0x8f] = &abs_write(get_ax);
+        table[0x83] = &izx_write(get_ax);
+
+        // SYA/SHY (Y & (H+1) -> abs,X)
+        table[0x9c] = &exec_sya;
+
+        // LAX (load A and X from memory)
+        table[0xa7] = &zp_read(op_lax);
+        table[0xb7] = &zpy_read(op_lax);
+        table[0xaf] = &abs_read(op_lax);
+        table[0xbf] = &aby_read(op_lax);
+        table[0xa3] = &izx_read(op_lax);
+        table[0xb3] = &izy_read(op_lax);
+
+        // SXA/SHX (X & (H+1) -> abs,Y)
+        table[0x9e] = &exec_sxa;
 
         // CMP
         table[0xc9] = &immediate(op_cmp);

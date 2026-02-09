@@ -80,6 +80,8 @@ pub const Bus = struct {
         } else if (k == 0x4017) {
             // $4017 write goes to APU frame counter
             self.apu.cpu_write(k, v);
+        } else if (k >= 0x4018 and k <= 0x5FFF) {
+            // Open bus - ignore writes
         } else if (k >= 0x6000 and k <= 0x7FFF) {
             self.prg_ram[k - 0x6000] = v;
         } else {
@@ -104,6 +106,9 @@ pub const Bus = struct {
             const r = (self.controllers_cache[k & 0x0001] & 0x80) > 0;
             self.controllers_cache[k & 0x0001] <<= 1;
             return if (r) 1 else 0;
+        } else if (k >= 0x4018 and k <= 0x5FFF) {
+            // Open bus
+            return 0;
         } else if (k >= 0x6000 and k <= 0x7FFF) {
             return self.prg_ram[k - 0x6000];
         }

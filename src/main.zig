@@ -90,6 +90,16 @@ pub fn main() !void {
         }
         std.debug.print("Screenshot saved to framebuffer.ppm ({d} frames)\n", .{frames});
 
+        // Dump blargg test result from PRG RAM ($6000+)
+        const status = nes2.prg_ram[0]; // $6000
+        std.debug.print("Test status: 0x{x:0>2}\n", .{status});
+        // Print text output at $6004+
+        var i: usize = 4;
+        while (i < 2048 and nes2.prg_ram[i] != 0) : (i += 1) {
+            std.debug.print("{c}", .{nes2.prg_ram[i]});
+        }
+        std.debug.print("\n", .{});
+
         return;
     }
 
@@ -191,6 +201,8 @@ pub fn main() !void {
 
     if (is_functional_test_rom) {
         nes.cpu.pc = 0x400;
+    } else if (std.mem.indexOf(u8, romName, "nestest.nes") != null) {
+        nes.cpu.pc = 0xc000;
     }
 
     // nes.cpu.debug = std.io.getStdOut().writer();
