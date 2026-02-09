@@ -238,6 +238,9 @@ pub fn main() !void {
 
     var t: u32 = 0;
     var now: i64 = c.fenster_time();
+    var fps_frame_count: u32 = 0;
+    var fps_timer: i64 = now;
+    var title_buf: [64]u8 = undefined;
     while (c.fenster_loop(&f) == 0) {
         // Exit when Escape is pressed
         if (f.keys[27] != 0) {
@@ -281,6 +284,18 @@ pub fn main() !void {
         }
 
         t +%= 1;
+        fps_frame_count += 1;
+        if (fps_frame_count >= 60) {
+            const elapsed = c.fenster_time() - fps_timer;
+            if (elapsed > 0) {
+                // NES NTSC is 60.0988 fps; 60 frames should take ~998.4ms
+                const speed: u32 = @intFromFloat(998.4 / @as(f64, @floatFromInt(elapsed)) * 100.0);
+                const title_slice = std.fmt.bufPrint(&title_buf, "zig-nes ({d}%)\x00", .{speed}) catch "zig-nes\x00";
+                c.fenster_retitle(&f, title_slice.ptr);
+            }
+            fps_frame_count = 0;
+            fps_timer = c.fenster_time();
+        }
         // Audio-driven timing: sleep when buffer is healthy, skip sleep to catch up
         const buf_level = nes.apu.ring_buffer.fill_level();
         if (buf_level > 4096) {

@@ -46,6 +46,7 @@ struct fenster {
 FENSTER_API int fenster_open(struct fenster *f);
 FENSTER_API int fenster_loop(struct fenster *f);
 FENSTER_API void fenster_close(struct fenster *f);
+FENSTER_API void fenster_retitle(struct fenster *f, const char *title);
 FENSTER_API void fenster_sleep(int64_t ms);
 FENSTER_API int64_t fenster_time(void);
 #define fenster_pixel(f, x, y) ((f)->buf[((y) * (f)->width) + (x)])
@@ -125,6 +126,11 @@ FENSTER_API int fenster_open(struct fenster *f) {
 
 FENSTER_API void fenster_close(struct fenster *f) {
   msg(void, f->wnd, "close");
+}
+
+FENSTER_API void fenster_retitle(struct fenster *f, const char *title) {
+  id str = msg1(id, cls("NSString"), "stringWithUTF8String:", const char *, title);
+  msg1(void, f->wnd, "setTitle:", id, str);
 }
 
 // clang-format off
@@ -259,6 +265,10 @@ FENSTER_API int fenster_open(struct fenster *f) {
 
 FENSTER_API void fenster_close(struct fenster *f) { (void)f; }
 
+FENSTER_API void fenster_retitle(struct fenster *f, const char *title) {
+  SetWindowTextA(f->hwnd, title);
+}
+
 FENSTER_API int fenster_loop(struct fenster *f) {
   MSG msg;
   while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -292,6 +302,9 @@ FENSTER_API int fenster_open(struct fenster *f) {
   return 0;
 }
 FENSTER_API void fenster_close(struct fenster *f) { XCloseDisplay(f->dpy); }
+FENSTER_API void fenster_retitle(struct fenster *f, const char *title) {
+  XStoreName(f->dpy, f->w, title);
+}
 FENSTER_API int fenster_loop(struct fenster *f) {
   XEvent ev;
   XPutImage(f->dpy, f->w, f->gc, f->img, 0, 0, 0, 0, f->width, f->height);
