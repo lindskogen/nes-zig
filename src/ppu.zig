@@ -58,6 +58,13 @@ const PPUMask = packed struct(u8) {
 
 const WriteLatch = enum { msb, lsb };
 
+const SpritePixel = struct {
+    pixel: u8 = 0,
+    palette: u8 = 0,
+    priority: bool = false,
+    is_sprite_zero: bool = false,
+};
+
 pub const PPU = struct {
     ctrl: PPUCtrl,
     mask: PPUMask,
@@ -102,6 +109,14 @@ pub const PPU = struct {
     /// Set to true when a frame has finished rendering
     frame_complete: bool,
 
+    /// Pre-evaluated sprite data for current scanline
+    sprite_scanline: [256]SpritePixel,
+    /// Background tile cache (invalidated each scanline)
+    bg_cache_v: u16,
+    bg_cache_tile_lsb: u8,
+    bg_cache_tile_msb: u8,
+    bg_cache_palette: u8,
+
     pub fn init() PPU {
         return PPU{
             .rom = null,
@@ -123,6 +138,11 @@ pub const PPU = struct {
             .oam_addr = 0,
             .frame_buffer = undefined,
             .frame_complete = false,
+            .sprite_scanline = undefined,
+            .bg_cache_v = 0xFFFF,
+            .bg_cache_tile_lsb = 0,
+            .bg_cache_tile_msb = 0,
+            .bg_cache_palette = 0,
         };
     }
 
@@ -141,6 +161,12 @@ pub const PPU = struct {
             self.status.sprite_0_hit = false;
             self.status.sprite_overflow = false;
             self.nmi_output = false;
+        }
+
+        // Pre-evaluate sprites and invalidate bg cache at start of each visible scanline
+        if (visible_line and self.cycle == 0) {
+            self.evaluate_sprites();
+            self.bg_cache_v = 0xFFFF;
         }
 
         // Visible scanlines: render pixels
@@ -219,6 +245,68 @@ pub const PPU = struct {
         }
     }
 
+    fn evaluate_sprites(self: *PPU) void {
+        @memset(&self.sprite_scanline, SpritePixel{});
+
+        const y: u16 = @intCast(self.scanline);
+        const sprite_height: u16 = if (self.ctrl.sprite_size == 1) 16 else 8;
+
+        for (0..64) |i| {
+            const sprite_y: u16 = @as(u16, self.oam[i * 4 + 0]) + 1;
+            if (y < sprite_y or y >= sprite_y + sprite_height) continue;
+
+            const tile_id: u16 = self.oam[i * 4 + 1];
+            const attr = self.oam[i * 4 + 2];
+            const sprite_x: u16 = self.oam[i * 4 + 3];
+            const flip_h = attr & 0x40 != 0;
+            const flip_v = attr & 0x80 != 0;
+
+            var row: u16 = y - sprite_y;
+            if (flip_v) row = sprite_height - 1 - row;
+
+            var pattern_addr: u16 = undefined;
+            if (self.ctrl.sprite_size == 1) {
+                const table: u16 = (tile_id & 1) * 0x1000;
+                const base_tile = tile_id & 0xFE;
+                if (row < 8) {
+                    pattern_addr = table + base_tile * 16 + row;
+                } else {
+                    pattern_addr = table + (base_tile + 1) * 16 + (row - 8);
+                }
+            } else {
+                const table: u16 = @as(u16, self.ctrl.sprite_pattern_table_addr) * 0x1000;
+                pattern_addr = table + tile_id * 16 + row;
+            }
+
+            const tile_lsb = self.ppu_read(pattern_addr);
+            const tile_msb = self.ppu_read(pattern_addr + 8);
+
+            for (0..8) |col_idx| {
+                const px: u16 = sprite_x + @as(u16, @intCast(col_idx));
+                if (px >= 256) continue;
+
+                // First non-transparent sprite wins (lower OAM index = higher priority)
+                if (self.sprite_scanline[px].pixel != 0) continue;
+
+                var col: u3 = @intCast(col_idx);
+                if (!flip_h) col = 7 - col;
+
+                const pixel_lsb: u8 = (tile_lsb >> col) & 1;
+                const pixel_msb: u8 = (tile_msb >> col) & 1;
+                const pixel = (pixel_msb << 1) | pixel_lsb;
+
+                if (pixel == 0) continue;
+
+                self.sprite_scanline[px] = .{
+                    .pixel = pixel,
+                    .palette = attr & 0x03,
+                    .priority = attr & 0x20 != 0,
+                    .is_sprite_zero = i == 0,
+                };
+            }
+        }
+    }
+
     fn render_pixel(self: *PPU) void {
         const x: u16 = @intCast(self.cycle - 1);
         const y: u16 = @intCast(self.scanline);
@@ -230,9 +318,6 @@ pub const PPU = struct {
             const fine_y: u3 = @truncate(self.v >> 12);
             const pixel_col: u3 = @truncate(x + @as(u16, self.fine_x));
 
-            // Determine if we need to look at the next tile due to fine_x offset.
-            // v's coarse_x tracks the current tile fetch position (incremented every 8 cycles).
-            // When (x % 8) + fine_x >= 8, the pixel falls in the next tile.
             var tile_v = self.v;
             if ((x & 7) + @as(u16, self.fine_x) >= 8) {
                 if (tile_v & 0x1F == 31) {
@@ -242,102 +327,50 @@ pub const PPU = struct {
                 }
             }
 
-            const coarse_x: u16 = tile_v & 0x1F;
-            const coarse_y: u16 = (tile_v >> 5) & 0x1F;
-            const nt: u16 = (tile_v >> 10) & 0x03;
+            // Only re-fetch tile data when tile_v changes (every ~8 pixels)
+            if (tile_v != self.bg_cache_v) {
+                self.bg_cache_v = tile_v;
+                const coarse_x: u16 = tile_v & 0x1F;
+                const coarse_y: u16 = (tile_v >> 5) & 0x1F;
+                const nt: u16 = (tile_v >> 10) & 0x03;
 
-            // Get tile index from nametable
-            const tile_addr: u16 = 0x2000 | (nt << 10) | (coarse_y << 5) | coarse_x;
-            const tile_id: u16 = self.ppu_read(tile_addr);
+                const tile_addr: u16 = 0x2000 | (nt << 10) | (coarse_y << 5) | coarse_x;
+                const tile_id: u16 = self.ppu_read(tile_addr);
 
-            // Get pattern table address
-            const pattern_base: u16 = @as(u16, self.ctrl.background_pattern_table_address) * 0x1000;
-            const pattern_addr = pattern_base + tile_id * 16 + @as(u16, fine_y);
+                const pattern_base: u16 = @as(u16, self.ctrl.background_pattern_table_address) * 0x1000;
+                const pattern_addr = pattern_base + tile_id * 16 + @as(u16, fine_y);
 
-            // Read the two bit planes for this row
-            const tile_lsb = self.ppu_read(pattern_addr);
-            const tile_msb = self.ppu_read(pattern_addr + 8);
+                self.bg_cache_tile_lsb = self.ppu_read(pattern_addr);
+                self.bg_cache_tile_msb = self.ppu_read(pattern_addr + 8);
 
-            // Extract the pixel (bit 7 is leftmost pixel)
+                const attr_addr: u16 = 0x2000 | (nt << 10) | 0x3C0 | ((coarse_y >> 2) << 3) | (coarse_x >> 2);
+                const attr_byte = self.ppu_read(attr_addr);
+                const attr_shift: u3 = @truncate(((coarse_y & 2) << 1) | (coarse_x & 2));
+                self.bg_cache_palette = (attr_byte >> attr_shift) & 0x03;
+            }
+
             const bit_shift: u3 = 7 - pixel_col;
-            const pixel_lsb: u8 = (tile_lsb >> bit_shift) & 1;
-            const pixel_msb: u8 = (tile_msb >> bit_shift) & 1;
+            const pixel_lsb: u8 = (self.bg_cache_tile_lsb >> bit_shift) & 1;
+            const pixel_msb: u8 = (self.bg_cache_tile_msb >> bit_shift) & 1;
             bg_pixel = (pixel_msb << 1) | pixel_lsb;
-
-            // Get attribute byte for palette selection
-            const attr_addr: u16 = 0x2000 | (nt << 10) | 0x3C0 | ((coarse_y >> 2) << 3) | (coarse_x >> 2);
-            const attr_byte = self.ppu_read(attr_addr);
-
-            const attr_shift: u3 = @truncate(((coarse_y & 2) << 1) | (coarse_x & 2));
-            bg_palette = (attr_byte >> attr_shift) & 0x03;
+            bg_palette = self.bg_cache_palette;
         }
 
-        // Sprite evaluation
+        // Sprite lookup from pre-evaluated scanline data
         var sprite_pixel: u8 = 0;
         var sprite_palette: u8 = 0;
-        var sprite_priority: bool = false; // false = in front of BG
+        var sprite_priority: bool = false;
         var sprite_zero_hit: bool = false;
 
         if (self.mask.show_sprites and !(x < 8 and !self.mask.show_sprites_left)) {
-            const sprite_height: u16 = if (self.ctrl.sprite_size == 1) 16 else 8;
-
-            for (0..64) |i| {
-                const sprite_y: u16 = @as(u16, self.oam[i * 4 + 0]) + 1;
-                const sprite_x: u16 = self.oam[i * 4 + 3];
-
-                // Check if this sprite is on the current pixel
-                if (x < sprite_x or x >= sprite_x + 8) continue;
-                if (y < sprite_y or y >= sprite_y + sprite_height) continue;
-
-                const tile_id: u16 = self.oam[i * 4 + 1];
-                const attr = self.oam[i * 4 + 2];
-                const flip_h = attr & 0x40 != 0;
-                const flip_v = attr & 0x80 != 0;
-
-                // Row within the sprite
-                var row: u16 = y - sprite_y;
-                if (flip_v) row = sprite_height - 1 - row;
-
-                // Pattern table address
-                var pattern_addr: u16 = undefined;
-                if (self.ctrl.sprite_size == 1) {
-                    // 8x16 mode: bit 0 of tile_id selects pattern table
-                    const table: u16 = (tile_id & 1) * 0x1000;
-                    const base_tile = tile_id & 0xFE;
-                    if (row < 8) {
-                        pattern_addr = table + base_tile * 16 + row;
-                    } else {
-                        pattern_addr = table + (base_tile + 1) * 16 + (row - 8);
-                    }
-                } else {
-                    // 8x8 mode
-                    const table: u16 = @as(u16, self.ctrl.sprite_pattern_table_addr) * 0x1000;
-                    pattern_addr = table + tile_id * 16 + row;
-                }
-
-                const tile_lsb = self.ppu_read(pattern_addr);
-                const tile_msb = self.ppu_read(pattern_addr + 8);
-
-                // Column within the sprite
-                var col: u3 = @truncate(x - sprite_x);
-                if (!flip_h) col = 7 - col;
-
-                const pixel_lsb: u8 = (tile_lsb >> col) & 1;
-                const pixel_msb: u8 = (tile_msb >> col) & 1;
-                const pixel = (pixel_msb << 1) | pixel_lsb;
-
-                if (pixel == 0) continue; // Transparent
-
-                // First non-transparent sprite wins
-                sprite_pixel = pixel;
-                sprite_palette = attr & 0x03;
-                sprite_priority = attr & 0x20 != 0;
-
-                // Sprite 0 hit detection
-                if (i == 0 and bg_pixel != 0 and x != 255) {
+            const sp = self.sprite_scanline[x];
+            if (sp.pixel != 0) {
+                sprite_pixel = sp.pixel;
+                sprite_palette = sp.palette;
+                sprite_priority = sp.priority;
+                if (sp.is_sprite_zero and bg_pixel != 0 and x != 255) {
                     sprite_zero_hit = true;
                 }
-                break;
             }
         }
 

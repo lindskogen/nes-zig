@@ -237,10 +237,12 @@ pub fn main() !void {
     }
 
     var t: u32 = 0;
-    var now: i64 = c.fenster_time();
     var fps_frame_count: u32 = 0;
-    var fps_timer: i64 = now;
+    var fps_timer: i64 = c.fenster_time();
     var title_buf: [64]u8 = undefined;
+    // NTSC NES: 60.0988 fps → 16.639 ms per frame
+    var next_frame: f64 = @floatFromInt(c.fenster_time());
+    const frame_duration: f64 = 1000.0 / 60.0988;
     while (c.fenster_loop(&f) == 0) {
         // Exit when Escape is pressed
         if (f.keys[27] != 0) {
@@ -296,16 +298,15 @@ pub fn main() !void {
             fps_frame_count = 0;
             fps_timer = c.fenster_time();
         }
-        // Audio-driven timing: sleep when buffer is healthy, skip sleep to catch up
-        const buf_level = nes.apu.ring_buffer.fill_level();
-        if (buf_level > 4096) {
-            // Buffer is healthy — sleep to avoid burning CPU
-            const diff: i64 = 1000 / 60 - (c.fenster_time() - now);
-            if (diff > 0) {
-                c.fenster_sleep(diff);
-            }
+        // Sleep to match NTSC frame rate (60.0988 fps)
+        next_frame += frame_duration;
+        const now: i64 = c.fenster_time();
+        const sleep_ms: i64 = @as(i64, @intFromFloat(next_frame)) - now;
+        if (sleep_ms > 0) {
+            c.fenster_sleep(sleep_ms);
+        } else if (sleep_ms < -100) {
+            // Fallen far behind (e.g. window drag), reset to avoid catch-up burst
+            next_frame = @floatFromInt(now);
         }
-        // else: buffer is low, skip sleep to produce audio faster
-        now = c.fenster_time();
     }
 }
