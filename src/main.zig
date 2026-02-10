@@ -20,6 +20,7 @@ const Bus = @import("bus.zig").Bus;
 const APU = @import("apu.zig").APU;
 const rom = @import("rom.zig");
 const cpu_debug = @import("debug.zig");
+const savestate = @import("savestate.zig");
 
 const SCALE: comptime_int = 2;
 const WIDTH: comptime_int = 256;
@@ -208,6 +209,16 @@ pub fn main() !void {
 
     // nes.cpu.debug = std.io.getStdOut().writer();
 
+    // Compute save path: replace extension with .save
+    var save_path_buf: [256]u8 = undefined;
+    const save_path: []const u8 = blk: {
+        const dot_pos = std.mem.lastIndexOfScalar(u8, romName, '.') orelse romName.len;
+        @memcpy(save_path_buf[0..dot_pos], romName[0..dot_pos]);
+        const ext = ".save";
+        @memcpy(save_path_buf[dot_pos .. dot_pos + ext.len], ext);
+        break :blk save_path_buf[0 .. dot_pos + ext.len];
+    };
+
     var game_buffer: [WIDTH * HEIGHT]u32 = undefined;
     var screen_buffer: [WIDTH * SCALE * HEIGHT * SCALE]u32 = undefined;
 
@@ -244,6 +255,8 @@ pub fn main() !void {
     var audio_samples_start: u64 = nes.apu.samples_produced;
     var title_buf: [96]u8 = undefined;
     // NTSC NES: 60.0988 fps → 16.639 ms per frame
+    var prev_save_key: bool = false;
+    var prev_load_key: bool = false;
     var next_frame: f64 = @floatFromInt(c.fenster_time());
     const frame_duration: f64 = 1000.0 / 60.0988;
     while (c.fenster_loop(&f) == 0) {
@@ -264,6 +277,36 @@ pub fn main() !void {
         if (f.keys[20] != 0) ctrl |= 0x02; // Left arrow
         if (f.keys[19] != 0) ctrl |= 0x01; // Right arrow
         nes.controllers[0] = ctrl;
+
+        // Save/load state
+        const save_key = f.keys['1'] != 0;
+        const load_key = f.keys['2'] != 0;
+
+        if (save_key and !prev_save_key) {
+            save_blk: {
+                savestate.save(&nes, &loaded_rom, save_path) catch |err| {
+                    std.debug.print("Save failed: {s}\n", .{@errorName(err)});
+                    break :save_blk;
+                };
+                std.debug.print("State saved to {s}\n", .{save_path});
+            }
+        }
+
+        if (load_key and !prev_load_key) {
+            load_blk: {
+                const cps = nes.apu.cycles_per_sample;
+                savestate.load(&nes, &loaded_rom, save_path) catch |err| {
+                    std.debug.print("Load failed: {s}\n", .{@errorName(err)});
+                    break :load_blk;
+                };
+                nes.apu.cycles_per_sample = cps;
+                audio_samples_start = nes.apu.samples_produced;
+                std.debug.print("State loaded from {s}\n", .{save_path});
+            }
+        }
+
+        prev_save_key = save_key;
+        prev_load_key = load_key;
 
         const emu_start = c.fenster_time();
 
