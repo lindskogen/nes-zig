@@ -108,6 +108,7 @@ pub const PPU = struct {
     frame_buffer: [256 * 240]u32,
     /// Set to true when a frame has finished rendering
     frame_complete: bool,
+    frame_count: u64 = 0,
 
     /// Pre-evaluated sprite data for current scanline
     sprite_scanline: [256]SpritePixel,
@@ -201,6 +202,7 @@ pub const PPU = struct {
         if (self.scanline == 241 and self.cycle == 1) {
             self.status.vertical_blank = true;
             self.frame_complete = true;
+            self.frame_count += 1;
             if (self.ctrl.nmi_enabled) {
                 self.nmi_output = true;
             }

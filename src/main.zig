@@ -89,6 +89,7 @@ pub fn main() !void {
             }
         }
         std.debug.print("Screenshot saved to framebuffer.ppm ({d} frames)\n", .{frames});
+        std.debug.print("PPU frame_count: {d}, CPU nmi_count: {d}, CPU total_cycles: {d}\n", .{ nes2.ppu.frame_count, nes2.cpu.nmi_count, nes2.cpu.total_cycles });
 
         // Dump blargg test result from PRG RAM ($6000+)
         const status = nes2.prg_ram[0]; // $6000
@@ -239,7 +240,9 @@ pub fn main() !void {
     var t: u32 = 0;
     var fps_frame_count: u32 = 0;
     var fps_timer: i64 = c.fenster_time();
-    var title_buf: [64]u8 = undefined;
+    var emu_time_acc: i64 = 0;
+    var audio_samples_start: u64 = nes.apu.samples_produced;
+    var title_buf: [96]u8 = undefined;
     // NTSC NES: 60.0988 fps → 16.639 ms per frame
     var next_frame: f64 = @floatFromInt(c.fenster_time());
     const frame_duration: f64 = 1000.0 / 60.0988;
@@ -262,6 +265,8 @@ pub fn main() !void {
         if (f.keys[19] != 0) ctrl |= 0x01; // Right arrow
         nes.controllers[0] = ctrl;
 
+        const emu_start = c.fenster_time();
+
         // Run until frame is complete
         while (!nes.ppu.frame_complete) {
             nes.clock();
@@ -274,6 +279,8 @@ pub fn main() !void {
         while (nes.ppu.frame_complete) {
             nes.clock();
         }
+
+        emu_time_acc += c.fenster_time() - emu_start;
 
         for (0..HEIGHT) |y| {
             for (0..WIDTH) |x| {
@@ -290,13 +297,27 @@ pub fn main() !void {
         if (fps_frame_count >= 60) {
             const elapsed = c.fenster_time() - fps_timer;
             if (elapsed > 0) {
-                // NES NTSC is 60.0988 fps; 60 frames should take ~998.4ms
-                const speed: u32 = @intFromFloat(998.4 / @as(f64, @floatFromInt(elapsed)) * 100.0);
-                const title_slice = std.fmt.bufPrint(&title_buf, "zig-nes ({d}%)\x00", .{speed}) catch "zig-nes\x00";
+                // Emulation speed: raw emu time vs real-time (can exceed 100%)
+                const emu_speed: u32 = if (emu_time_acc > 0)
+                    @intFromFloat(998.4 / @as(f64, @floatFromInt(emu_time_acc)) * 100.0)
+                else
+                    9999;
+
+                // Audio speed: samples produced vs expected for wall-clock elapsed time
+                const samples_produced = nes.apu.samples_produced - audio_samples_start;
+                const expected_samples: f64 = @as(f64, @floatFromInt(elapsed)) * @as(f64, @floatFromInt(SAMPLE_RATE)) / 1000.0;
+                const audio_speed: u32 = if (expected_samples > 0)
+                    @intFromFloat(@as(f64, @floatFromInt(samples_produced)) / expected_samples * 100.0)
+                else
+                    100;
+
+                const title_slice = std.fmt.bufPrint(&title_buf, "zig-nes (emu: {d}% | audio: {d}%)\x00", .{ emu_speed, audio_speed }) catch "zig-nes\x00";
                 c.fenster_retitle(&f, title_slice.ptr);
             }
             fps_frame_count = 0;
             fps_timer = c.fenster_time();
+            emu_time_acc = 0;
+            audio_samples_start = nes.apu.samples_produced;
         }
         // Sleep to match NTSC frame rate (60.0988 fps)
         next_frame += frame_duration;

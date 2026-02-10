@@ -494,6 +494,7 @@ pub const APU = struct {
 
     // Output ring buffer
     ring_buffer: RingBuffer = .{},
+    samples_produced: u64 = 0,
 
     pub fn init() APU {
         var apu = APU{};
@@ -523,7 +524,7 @@ pub const APU = struct {
         // Triangle timer clocks at CPU rate
         self.triangle.clock_timer();
 
-        // Pulse, noise, DMC clock at half CPU rate (every other cycle)
+        // Pulse, noise, DMC, and frame counter clock at half CPU rate (every other cycle)
         if (self.cycle % 2 == 0) {
             self.pulse1.clock_timer();
             self.pulse2.clock_timer();
@@ -535,10 +536,10 @@ pub const APU = struct {
             } else {
                 self.dmc.timer -= 1;
             }
-        }
 
-        // Frame counter
-        self.clock_frame_counter();
+            // Frame counter (sequencer clocked at APU rate = half CPU rate)
+            self.clock_frame_counter();
+        }
 
         // Handle frame reset delay
         if (self.frame_reset_timer > 0) {
@@ -581,6 +582,7 @@ pub const APU = struct {
             const pulse_out = self.pulse_table[@min(avg_pulse, 30)];
             const tnd_out = self.tnd_table[@min(avg_tnd, 202)];
             self.ring_buffer.push(pulse_out + tnd_out);
+            self.samples_produced += 1;
             self.pulse_acc = 0;
             self.tnd_acc = 0;
             self.sample_count = 0;

@@ -42,6 +42,7 @@ pub const CPU = struct {
     data2: u8 = 0, // secondary latch (page-cross flag in bit 0)
 
     total_cycles: u64 = 0,
+    nmi_count: u64 = 0,
 
     // Interrupt lines (driven by bus wiring)
     nmi_line: bool = false,
@@ -125,6 +126,7 @@ pub const CPU = struct {
             // Instruction boundary — check for pending interrupts
             if (self.nmi_pending) {
                 self.nmi_pending = false;
+                self.nmi_count += 1;
                 self.interrupt_pending = .nmi;
                 _ = self.read(self.pc);
                 self.opcode = 0;
