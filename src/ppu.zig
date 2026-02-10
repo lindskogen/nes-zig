@@ -252,10 +252,17 @@ pub const PPU = struct {
 
         const y: u16 = @intCast(self.scanline);
         const sprite_height: u16 = if (self.ctrl.sprite_size == 1) 16 else 8;
+        var sprite_count: u8 = 0;
 
         for (0..64) |i| {
             const sprite_y: u16 = @as(u16, self.oam[i * 4 + 0]) + 1;
             if (y < sprite_y or y >= sprite_y + sprite_height) continue;
+
+            sprite_count += 1;
+            if (sprite_count > 8) {
+                self.status.sprite_overflow = true;
+                break;
+            }
 
             const tile_id: u16 = self.oam[i * 4 + 1];
             const attr = self.oam[i * 4 + 2];
