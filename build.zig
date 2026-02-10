@@ -66,19 +66,26 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.addIncludePath(b.path("vendor"));
-    exe.addCSourceFile(.{ .file = b.path("vendor/fenster.c") });
+    exe.addIncludePath(b.path("vendor/glad/include"));
+    exe.addCSourceFile(.{ .file = b.path("vendor/glad/src/gl.c") });
     exe.addCSourceFile(.{ .file = b.path("vendor/miniaudio.c"), .flags = &.{ "-fno-sanitize=undefined", "-Wno-incompatible-function-pointer-types" } });
+
+    exe.linkSystemLibrary("glfw3");
 
     switch (target.result.os.tag) {
         .macos => {
+            exe.linkFramework("OpenGL");
             exe.linkFramework("Cocoa");
+            exe.linkFramework("IOKit");
             exe.linkFramework("CoreAudio");
             exe.linkFramework("AudioToolbox");
         },
         .windows => {
+            exe.linkSystemLibrary("opengl32");
             exe.linkSystemLibrary("gdi32");
         },
         else => {
+            exe.linkSystemLibrary("GL");
             exe.linkSystemLibrary("X11");
         },
     }

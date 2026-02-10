@@ -14,6 +14,7 @@ What am I doing? Trying to write an emulator as a first zig project? Let's see h
 | Arrow keys | D-pad |
 | 1 | Save state |
 | 2 | Load state |
+| C | Toggle CRT shader |
 | Esc | Quit |
 
 Save states are written alongside the ROM file (e.g. `roms/game.nes` -> `roms/game.save`).

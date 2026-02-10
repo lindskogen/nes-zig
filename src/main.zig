@@ -1,7 +1,9 @@
 const std = @import("std");
-const c = @cImport({
-    @cDefine("FENSTER_HEADER", {});
-    @cInclude("fenster.h");
+const glfw = @cImport({
+    @cInclude("GLFW/glfw3.h");
+});
+const gl = @cImport({
+    @cInclude("glad/gl.h");
 });
 // miniaudio uses self-referential struct types that Zig's cImport can't translate,
 // so we use an opaque wrapper compiled from C instead.
@@ -21,8 +23,9 @@ const APU = @import("apu.zig").APU;
 const rom = @import("rom.zig");
 const cpu_debug = @import("debug.zig");
 const savestate = @import("savestate.zig");
+const Renderer = @import("renderer.zig").Renderer;
 
-const SCALE: comptime_int = 2;
+const SCALE: comptime_int = 3;
 const WIDTH: comptime_int = 256;
 const HEIGHT: comptime_int = 240;
 const SAMPLE_RATE: u32 = 44100;
@@ -207,8 +210,6 @@ pub fn main() !void {
         nes.cpu.pc = 0xc000;
     }
 
-    // nes.cpu.debug = std.io.getStdOut().writer();
-
     // Compute save path: replace extension with .save
     var save_path_buf: [256]u8 = undefined;
     const save_path: []const u8 = blk: {
@@ -219,18 +220,45 @@ pub fn main() !void {
         break :blk save_path_buf[0 .. dot_pos + ext.len];
     };
 
-    var game_buffer: [WIDTH * HEIGHT]u32 = undefined;
-    var screen_buffer: [WIDTH * SCALE * HEIGHT * SCALE]u32 = undefined;
+    // --- GLFW + OpenGL init ---
+    if (glfw.glfwInit() == 0) {
+        std.debug.print("Failed to initialize GLFW\n", .{});
+        return;
+    }
+    defer glfw.glfwTerminate();
 
-    var f = std.mem.zeroInit(c.fenster, .{
-        .width = WIDTH * SCALE,
-        .height = HEIGHT * SCALE,
-        .title = "zig-nes",
-        .buf = &screen_buffer[0],
-    });
+    glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfw.glfwWindowHint(glfw.GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfw.glfwWindowHint(glfw.GLFW_OPENGL_PROFILE, glfw.GLFW_OPENGL_CORE_PROFILE);
+    glfw.glfwWindowHint(glfw.GLFW_OPENGL_FORWARD_COMPAT, 1); // required on macOS
 
-    _ = c.fenster_open(&f);
-    defer c.fenster_close(&f);
+    const window = glfw.glfwCreateWindow(WIDTH * SCALE, HEIGHT * SCALE, "zig-nes", null, null) orelse {
+        std.debug.print("Failed to create GLFW window\n", .{});
+        return;
+    };
+    defer glfw.glfwDestroyWindow(window);
+
+    glfw.glfwMakeContextCurrent(window);
+
+    // Load OpenGL function pointers via glad
+    if (gl.gladLoadGL(@ptrCast(&glfw.glfwGetProcAddress)) == 0) {
+        std.debug.print("Failed to load OpenGL functions\n", .{});
+        return;
+    }
+
+    // Use framebuffer size (not window size) for viewport — on Retina/HiDPI
+    // displays the framebuffer is larger than the window in points.
+    var fb_width: c_int = 0;
+    var fb_height: c_int = 0;
+    glfw.glfwGetFramebufferSize(window, &fb_width, &fb_height);
+    gl.glViewport(0, 0, fb_width, fb_height);
+    gl.glClearColor(0.0, 0.0, 0.0, 1.0);
+
+    // Disable vsync — we do our own 60.0988 Hz timing
+    glfw.glfwSwapInterval(0);
+
+    var renderer = Renderer.init(@intCast(fb_width), @intCast(fb_height));
+    defer renderer.deinit();
 
     // Init audio — request 44100Hz but use whatever the device actually gives us
     audio_apu_ptr = @ptrCast(&nes.apu);
@@ -250,37 +278,43 @@ pub fn main() !void {
 
     var t: u32 = 0;
     var fps_frame_count: u32 = 0;
-    var fps_timer: i64 = c.fenster_time();
+    var fps_timer: i64 = std.time.milliTimestamp();
     var emu_time_acc: i64 = 0;
     var audio_samples_start: u64 = nes.apu.samples_produced;
     var title_buf: [96]u8 = undefined;
     // NTSC NES: 60.0988 fps → 16.639 ms per frame
     var prev_save_key: bool = false;
     var prev_load_key: bool = false;
-    var next_frame: f64 = @floatFromInt(c.fenster_time());
+    var prev_crt_key: bool = false;
+    var next_frame: f64 = @floatFromInt(std.time.milliTimestamp());
     const frame_duration: f64 = 1000.0 / 60.0988;
-    while (c.fenster_loop(&f) == 0) {
+
+    while (glfw.glfwWindowShouldClose(window) == 0) {
+        glfw.glfwPollEvents();
+
         // Exit when Escape is pressed
-        if (f.keys[27] != 0) {
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_ESCAPE) == glfw.GLFW_PRESS) {
             break;
         }
 
         // Update controller input
         // NES controller bits: A B Select Start Up Down Left Right
         var ctrl: u8 = 0;
-        if (f.keys['Z'] != 0 or f.keys['z'] != 0) ctrl |= 0x80; // A
-        if (f.keys['X'] != 0 or f.keys['x'] != 0) ctrl |= 0x40; // B
-        if (f.keys[16] != 0) ctrl |= 0x20; // Select = Right Shift (fenster key 16)
-        if (f.keys[10] != 0) ctrl |= 0x10; // Start = Enter (fenster key 10)
-        if (f.keys[17] != 0) ctrl |= 0x08; // Up arrow
-        if (f.keys[18] != 0) ctrl |= 0x04; // Down arrow
-        if (f.keys[20] != 0) ctrl |= 0x02; // Left arrow
-        if (f.keys[19] != 0) ctrl |= 0x01; // Right arrow
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_Z) == glfw.GLFW_PRESS) ctrl |= 0x80; // A
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_X) == glfw.GLFW_PRESS) ctrl |= 0x40; // B
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT_SHIFT) == glfw.GLFW_PRESS or
+            glfw.glfwGetKey(window, glfw.GLFW_KEY_RIGHT_SHIFT) == glfw.GLFW_PRESS) ctrl |= 0x20; // Select
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_ENTER) == glfw.GLFW_PRESS) ctrl |= 0x10; // Start
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_UP) == glfw.GLFW_PRESS) ctrl |= 0x08; // Up
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_DOWN) == glfw.GLFW_PRESS) ctrl |= 0x04; // Down
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_LEFT) == glfw.GLFW_PRESS) ctrl |= 0x02; // Left
+        if (glfw.glfwGetKey(window, glfw.GLFW_KEY_RIGHT) == glfw.GLFW_PRESS) ctrl |= 0x01; // Right
         nes.controllers[0] = ctrl;
 
         // Save/load state
-        const save_key = f.keys['1'] != 0;
-        const load_key = f.keys['2'] != 0;
+        const save_key = glfw.glfwGetKey(window, glfw.GLFW_KEY_1) == glfw.GLFW_PRESS;
+        const load_key = glfw.glfwGetKey(window, glfw.GLFW_KEY_2) == glfw.GLFW_PRESS;
+        const crt_key = glfw.glfwGetKey(window, glfw.GLFW_KEY_C) == glfw.GLFW_PRESS;
 
         if (save_key and !prev_save_key) {
             save_blk: {
@@ -305,40 +339,37 @@ pub fn main() !void {
             }
         }
 
+        if (crt_key and !prev_crt_key) {
+            renderer.toggleCrt();
+        }
+
         prev_save_key = save_key;
         prev_load_key = load_key;
+        prev_crt_key = crt_key;
 
-        const emu_start = c.fenster_time();
+        const emu_start = std.time.milliTimestamp();
 
         // Run until frame is complete
         while (!nes.ppu.frame_complete) {
             nes.clock();
         }
 
-        // Copy frame buffer to game buffer
-        @memcpy(&game_buffer, &nes.ppu.frame_buffer);
-
         // Continue running until next frame starts
         while (nes.ppu.frame_complete) {
             nes.clock();
         }
 
-        emu_time_acc += c.fenster_time() - emu_start;
+        emu_time_acc += std.time.milliTimestamp() - emu_start;
 
-        for (0..HEIGHT) |y| {
-            for (0..WIDTH) |x| {
-                inline for (0..2) |dx| {
-                    inline for (0..2) |dy| {
-                        screen_buffer[((y * SCALE) + dy) * WIDTH * SCALE + (x * SCALE) + dx] = game_buffer[y * WIDTH + x];
-                    }
-                }
-            }
-        }
+        // Upload framebuffer to GPU and draw
+        renderer.uploadFrame(&nes.ppu.frame_buffer);
+        renderer.draw();
+        glfw.glfwSwapBuffers(window);
 
         t +%= 1;
         fps_frame_count += 1;
         if (fps_frame_count >= 60) {
-            const elapsed = c.fenster_time() - fps_timer;
+            const elapsed = std.time.milliTimestamp() - fps_timer;
             if (elapsed > 0) {
                 // Emulation speed: raw emu time vs real-time (can exceed 100%)
                 const emu_speed: u32 = if (emu_time_acc > 0)
@@ -355,19 +386,19 @@ pub fn main() !void {
                     100;
 
                 const title_slice = std.fmt.bufPrint(&title_buf, "zig-nes (emu: {d}% | audio: {d}%)\x00", .{ emu_speed, audio_speed }) catch "zig-nes\x00";
-                c.fenster_retitle(&f, title_slice.ptr);
+                glfw.glfwSetWindowTitle(window, title_slice.ptr);
             }
             fps_frame_count = 0;
-            fps_timer = c.fenster_time();
+            fps_timer = std.time.milliTimestamp();
             emu_time_acc = 0;
             audio_samples_start = nes.apu.samples_produced;
         }
         // Sleep to match NTSC frame rate (60.0988 fps)
         next_frame += frame_duration;
-        const now: i64 = c.fenster_time();
+        const now: i64 = std.time.milliTimestamp();
         const sleep_ms: i64 = @as(i64, @intFromFloat(next_frame)) - now;
         if (sleep_ms > 0) {
-            c.fenster_sleep(sleep_ms);
+            std.time.sleep(@intCast(sleep_ms * std.time.ns_per_ms));
         } else if (sleep_ms < -100) {
             // Fallen far behind (e.g. window drag), reset to avoid catch-up burst
             next_frame = @floatFromInt(now);
